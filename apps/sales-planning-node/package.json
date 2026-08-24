@@ -1,0 +1,43 @@
+{
+  "name": "vic-forecast-app",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "lint": "tsc --noEmit",
+    "test:excel": "tsx -e \"import('./src/utils/excelExport.test').then(m => m.runExcelExportAcceptanceTests()).then(r => console.log(JSON.stringify(r, null, 2)))\"",
+    "start": "node server/index.js",
+    "test:deploy": "node tests/deploy-config.test.js"
+  },
+  "dependencies": {
+    "@databricks/sql": "^1.0.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.2"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.0.0",
+    "@types/express": "^4.17.21",
+    "@types/file-saver": "^2.0.7",
+    "@types/node": "^22.10.2",
+    "@types/react": "^19.0.2",
+    "@types/react-dom": "^19.0.2",
+    "@vitejs/plugin-react": "^4.3.4",
+    "exceljs": "^4.4.0",
+    "file-saver": "^2.0.5",
+    "lucide-react": "^0.546.0",
+    "motion": "^12.23.24",
+    "react": "^19.0.1",
+    "react-dom": "^19.0.1",
+    "recharts": "^3.10.1",
+    "tailwindcss": "^4.0.0",
+    "tsx": "^4.19.2",
+    "typescript": "~5.8.2",
+    "vite": "^6.2.3"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

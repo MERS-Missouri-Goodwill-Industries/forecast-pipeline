@@ -1,0 +1,138 @@
+name: Validate and deploy Databricks App
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "apps/**"
+      - ".github/workflows/deploy-app.yml"
+  pull_request:
+    paths:
+      - "apps/**"
+  workflow_dispatch:
+    inputs:
+      app:
+        description: "Which app to deploy"
+        required: true
+        default: "node"
+        type: choice
+        options: [node, python]
+
+concurrency:
+  group: databricks-app-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Both apps are validated on every push. The deploy-config checks reproduce the
+  # "No command to run and no Python file found" failure locally, so a broken app.yaml
+  # fails CI instead of the platform.
+  validate-node:
+    name: Validate Node app
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/sales-planning-node
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/sales-planning-node/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Build UI
+        run: npm run build
+
+      - name: Deployment config checks
+        run: npm run test:deploy
+
+      - name: Workbook acceptance criteria
+        run: |
+          npm run test:excel | tee /tmp/results.json
+          node -e "
+            const r = JSON.parse(require('fs').readFileSync('/tmp/results.json','utf8'));
+            const failed = r.filter(x => !x.passed);
+            failed.forEach(f => console.error('FAILED:', f.criterion, '-', f.detail));
+            console.log(\`\${r.length - failed.length}/\${r.length} criteria passed\`);
+            process.exit(failed.length ? 1 : 0);
+          "
+
+      - name: Upload built UI
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-app-dist
+          path: apps/sales-planning-node/dist
+          retention-days: 7
+
+  validate-python:
+    name: Validate Python app
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/sales-planning-python
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: apps/sales-planning-python/requirements.txt
+
+      - name: Install
+        run: pip install -r requirements.txt
+
+      - name: Acceptance + deployment config checks
+        run: python tests/test_acceptance.py
+
+  deploy:
+    name: Deploy to Databricks
+    needs: [validate-node, validate-python]
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    environment: databricks
+    env:
+      DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+      DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
+      DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
+      APP_NAME: fy2027-sales-planning
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select source directory
+        id: pick
+        run: |
+          if [ "${{ inputs.app }}" = "python" ]; then
+            echo "dir=apps/sales-planning-python" >> "$GITHUB_OUTPUT"
+          else
+            echo "dir=apps/sales-planning-node" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build UI (node only)
+        if: inputs.app == 'node'
+        working-directory: apps/sales-planning-node
+        run: |
+          npm ci
+          npm run build
+
+      - uses: databricks/setup-cli@main
+
+      - name: Sync source to workspace
+        run: |
+          TARGET="/Workspace/Shared/${APP_NAME}"
+          databricks sync "${{ steps.pick.outputs.dir }}" "$TARGET" --full
+
+      - name: Create app if absent
+        run: databricks apps create "$APP_NAME" || echo "app already exists"
+
+      - name: Deploy
+        run: |
+          databricks apps deploy "$APP_NAME" \
+            --source-code-path "/Workspace/Shared/${APP_NAME}"
+
+      - name: Report
+        run: |
+          echo "Deployed ${{ inputs.app }} app from ${{ steps.pick.outputs.dir }}"
+          echo "Bind the SQL warehouse as an App Resource in the Apps UI if not already done."

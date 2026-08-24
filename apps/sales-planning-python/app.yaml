@@ -1,0 +1,36 @@
+# Databricks Apps configuration.
+#
+# The `command` field below is REQUIRED. Without it (or if this file is named app.yml
+# instead of app.yaml, or is not at the root of the deployed source directory) the
+# deployment fails with:
+#
+#   "No command to run and no Python file found. Please add a 'command' field to your
+#    app.yml file."
+#
+# tests/test_acceptance.py::test_deploy_config guards every one of those conditions.
+#
+# $DATABRICKS_APP_PORT is substituted by the platform at runtime. It is the ONLY
+# environment variable interpolated into `command` -- the command is not run through a
+# shell, so no other $VAR will expand here.
+command:
+  - "streamlit"
+  - "run"
+  - "app.py"
+  - "--server.port"
+  - "$DATABRICKS_APP_PORT"
+  - "--server.address"
+  - "0.0.0.0"
+  - "--server.headless"
+  - "true"
+
+env:
+  # DATABRICKS_HOST, DATABRICKS_APP_PORT, DATABRICKS_CLIENT_ID and DATABRICKS_CLIENT_SECRET
+  # are injected automatically by the platform -- do not declare them here.
+  #
+  # DATABRICKS_HTTP_PATH is NOT injected, so it is set explicitly. Bind the SQL warehouse
+  # as an App Resource in the Apps UI ("+ Add resource" -> SQL warehouse) so the app's
+  # service principal receives OAuth credentials for it.
+  - name: "DATABRICKS_HTTP_PATH"
+    value: "/sql/1.0/warehouses/3d33bbee9a23df31"
+  - name: "STREAMLIT_BROWSER_GATHER_USAGE_STATS"
+    value: "false"

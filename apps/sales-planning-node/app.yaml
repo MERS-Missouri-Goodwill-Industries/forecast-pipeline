@@ -1,0 +1,13 @@
+command:
+  - "node"
+  - "server/index.js"
+
+env:
+  - name: "NODE_ENV"
+    value: "production"
+  # DATABRICKS_HOST, DATABRICKS_APP_PORT, DATABRICKS_CLIENT_ID, and DATABRICKS_CLIENT_SECRET are
+  # auto-injected by Databricks Apps at runtime — do not declare them here.
+  # DATABRICKS_CLIENT_ID/SECRET only appear once a SQL warehouse resource is bound to this app via
+  # the Apps UI ("+ Add resource" -> SQL warehouse -> grant CAN_USE to the app's service principal).
+  - name: "DATABRICKS_HTTP_PATH"
+    value: "/sql/1.0/warehouses/3d33bbee9a23df31"
