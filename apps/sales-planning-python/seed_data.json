@@ -1,0 +1,514 @@
+{
+  "stores": [
+    {
+      "code": "LEAD",
+      "name": "ADC - Leawood",
+      "region": "West",
+      "status": "Continuing",
+      "base_sales": 192308.53
+    },
+    {
+      "code": "ALTS",
+      "name": "Alton - Homer Adams",
+      "region": "East",
+      "status": "Continuing",
+      "base_sales": 1493493.34
+    },
+    {
+      "code": "ARNS",
+      "name": "Arnold - Richardson",
+      "region": "East",
+      "status": "Continuing",
+      "base_sales": 1423030.18
+    },
+    {
+      "code": "BELS",
+      "name": "Belleville - Belt",
+      "region": "East",
+      "status": "Continuing",
+      "base_sales": 993212.25
+    },
+    {
+      "code": "BLUE",
+      "name": "Blue Springs - MO-7",
+      "region": "West",
+      "status": "Continuing",
+      "base_sales": 578776.17
+    },
+    {
+      "code": "BONN",
+      "name": "Bonner Springs - 129th St",
+      "region": "West",
+      "status": "Continuing",
+      "base_sales": 741254.73
+    },
+    {
+      "code": "BRES",
+      "name": "Brentwood - Manchester",
+      "region": "East",
+      "status": "Continuing",
+      "base_sales": 1020149.88
+    },
+    {
+      "code": "CAPS",
+      "name": "Cape Girardeau - Silver Springs",
+      "region": "East",
+      "status": "Continuing",
+      "base_sales": 1542298.45
+    },
+    {
+      "code": "CARS",
+      "name": "Carbondale - Main",
+      "region": "East",
+      "status": "Continuing",
+      "base_sales": 1215726.31
+    },
+    {
+      "code": "CENS",
+      "name": "Centralia - Broadway",
+      "region": "East",
+      "status": "Continuing",
+      "base_sales": 1015632.34
+    },
+    {
+      "code": "CHES",
+      "name": "Chesterfield - Forum",
+      "region": "East",
+      "status": "Continuing",
+      "base_sales": 1105234.11
+    },
+    {
+      "code": "CHVS",
+      "name": "Chesterfield - Valley",
+      "region": "East",
+      "status": "Continuing",
+      "base_sales": 1119818.09
+    },
+    {
+      "code": "COLS",
+      "name": "Columbia - Grindstone",
+      "region": "East",
+      "status": "Continuing",
+      "base_sales": 2533079.25
+    },
+    {
+      "code": "EURE",
+      "name": "Eureka - Thresher",
+      "region": "East",
+      "status": "New store",
+      "base_sales": 0
+    },
+    {
+      "code": "FARS",
+      "name": "Farmington - Potosi",
+      "region": "East",
+      "status": "Continuing",
+      "base_sales": 1431705.44
+    },
+    {
+      "code": "FENS",
+      "name": "Fenton - Gravois Bluffs",
+      "region": "East",
+      "status": "Continuing",
+      "base_sales": 1254523.5
+    },
+    {
+      "code": "FESS",
+      "name": "Festus - Truman",
+      "region": "East",
+      "status": "Continuing",
+      "base_sales": 1252763.23
+    },
+    {
+      "code": "FLOS",
+      "name": "Florissant - Highway 67",
+      "region": "East",
+      "status": "Continuing",
+      "base_sales": 1434923.03
+    },
+    {
+      "code": "GLCS",
+      "name": "Glen Carbon - Junction",
+      "region": "East",
+      "status": "Continuing",
+      "base_sales": 1601740.14
+    },
+    {
+      "code": "GRAS",
+      "name": "Granite City - Nameoki",
+      "region": "East",
+      "status": "Continuing",
+      "base_sales": 1189514.41
+    },
+    {
+      "code": "HANS",
+      "name": "Hannibal - Stardust",
+      "region": "East",
+      "status": "Continuing",
+      "base_sales": 1065815.73
+    },
+    {
+      "code": "JEFS",
+      "name": "Jefferson City - Ten Mile",
+      "region": "East",
+      "status": "Continuing",
+      "base_sales": 1460932.62
+    },
+    {
+      "code": "JENS",
+      "name": "Jennings - Florissant",
+      "region": "East",
+      "status": "Continuing",
+      "base_sales": 880135.84
+    },
+    {
+      "code": "KANS",
+      "name": "Kansas City - E 63rd",
+      "region": "West",
+      "status": "Continuing",
+      "base_sales": 466549.05
+    },
+    {
+      "code": "KANC",
+      "name": "Kansas City - Main St",
+      "region": "West",
+      "status": "Continuing",
+      "base_sales": 596186.71
+    },
+    {
+      "code": "KACI",
+      "name": "Kansas City - N Oak",
+      "region": "West",
+      "status": "Continuing",
+      "base_sales": 867571.27
+    },
+    {
+      "code": "LAKS",
+      "name": "Lake St. Louis - Robert Raymond",
+      "region": "East",
+      "status": "Continuing",
+      "base_sales": 1524948.34
+    },
+    {
+      "code": "LAWR",
+      "name": "Lawrence - 31st St",
+      "region": "West",
+      "status": "Continuing",
+      "base_sales": 1115465.03
+    },
+    {
+      "code": "LEAV",
+      "name": "Leavenworth - Broadway",
+      "region": "West",
+      "status": "Continuing",
+      "base_sales": 717877.76
+    },
+    {
+      "code": "LEES",
+      "name": "Lee's Summit - Ward",
+      "region": "West",
+      "status": "Continuing",
+      "base_sales": 776925.4
+    },
+    {
+      "code": "LIBE",
+      "name": "Liberty - N Cedar",
+      "region": "West",
+      "status": "Continuing",
+      "base_sales": 792443.91
+    },
+    {
+      "code": "MANS",
+      "name": "Manchester - Manchester Rd",
+      "region": "East",
+      "status": "Continuing",
+      "base_sales": 1216452.97
+    },
+    {
+      "code": "MANH",
+      "name": "Manhattan - Poyntz",
+      "region": "West",
+      "status": "Continuing",
+      "base_sales": 1247271.87
+    },
+    {
+      "code": "MARS",
+      "name": "Marion - Outer",
+      "region": "East",
+      "status": "Continuing",
+      "base_sales": 1447683.73
+    },
+    {
+      "code": "MEXS",
+      "name": "Mexico - Clark",
+      "region": "East",
+      "status": "Continuing",
+      "base_sales": 1001202.98
+    },
+    {
+      "code": "MOBS",
+      "name": "Moberly - Morley",
+      "region": "East",
+      "status": "Continuing",
+      "base_sales": 1193971.13
+    },
+    {
+      "code": "OFAL",
+      "name": "O'Fallon - Auto Court",
+      "region": "East",
+      "status": "Continuing",
+      "base_sales": 1208732.5
+    },
+    {
+      "code": "OFAH",
+      "name": "O'Fallon - Highway K",
+      "region": "East",
+      "status": "Continuing",
+      "base_sales": 1152368.08
+    },
+    {
+      "code": "OFAM",
+      "name": "O'Fallon - Market Center",
+      "region": "East",
+      "status": "New store",
+      "base_sales": 0
+    },
+    {
+      "code": "OLAT",
+      "name": "Olathe - Strang Line",
+      "region": "West",
+      "status": "Continuing",
+      "base_sales": 685120.5
+    },
+    {
+      "code": "OUTL",
+      "name": "Outlet - Bannister",
+      "region": "West",
+      "status": "Continuing",
+      "base_sales": 1665380.63
+    },
+    {
+      "code": "OUTS",
+      "name": "Outlet - Market",
+      "region": "East",
+      "status": "Continuing",
+      "base_sales": 1881967.19
+    },
+    {
+      "code": "OUTM",
+      "name": "Outlet - Mills",
+      "region": "East",
+      "status": "Continuing",
+      "base_sales": 1731046.17
+    },
+    {
+      "code": "OVER",
+      "name": "Overland Park - 135th St",
+      "region": "West",
+      "status": "Continuing",
+      "base_sales": 1077181.02
+    },
+    {
+      "code": "OZAS",
+      "name": "Ozark - W South",
+      "region": "East",
+      "status": "Continuing",
+      "base_sales": 1313379.17
+    },
+    {
+      "code": "PITT",
+      "name": "Pittsburg - Broadway",
+      "region": "West",
+      "status": "Continuing",
+      "base_sales": 704951.8
+    },
+    {
+      "code": "POPS",
+      "name": "Poplar Bluff - Westwood",
+      "region": "East",
+      "status": "Continuing",
+      "base_sales": 1411983.43
+    },
+    {
+      "code": "ROLS",
+      "name": "Rolla - Forum",
+      "region": "East",
+      "status": "Continuing",
+      "base_sales": 1444286.59
+    },
+    {
+      "code": "SHAW",
+      "name": "Shawnee - Mission Pkwy",
+      "region": "West",
+      "status": "Continuing",
+      "base_sales": 1000620.32
+    },
+    {
+      "code": "SIKS",
+      "name": "Sikeston - Brunt",
+      "region": "East",
+      "status": "Continuing",
+      "base_sales": 1108321.07
+    },
+    {
+      "code": "SOUS",
+      "name": "South County - Baptist Church",
+      "region": "East",
+      "status": "Continuing",
+      "base_sales": 1934135.44
+    },
+    {
+      "code": "SPRI",
+      "name": "Springfield - Kansas Pkwy",
+      "region": "East",
+      "status": "Continuing",
+      "base_sales": 2002651.32
+    },
+    {
+      "code": "SPRW",
+      "name": "Springfield - Western Ave",
+      "region": "East",
+      "status": "Continuing",
+      "base_sales": 1323062.88
+    },
+    {
+      "code": "STCS",
+      "name": "St. Charles - Clay",
+      "region": "East",
+      "status": "Continuing",
+      "base_sales": 1113568.23
+    },
+    {
+      "code": "STJ",
+      "name": "St. Joseph - Faraon",
+      "region": "West",
+      "status": "Continuing",
+      "base_sales": 659692.5
+    },
+    {
+      "code": "BAYS",
+      "name": "St. Louis - Bayless",
+      "region": "East",
+      "status": "Continuing",
+      "base_sales": 929950.58
+    },
+    {
+      "code": "HARS",
+      "name": "St. Peters - Harvester",
+      "region": "East",
+      "status": "Continuing",
+      "base_sales": 1130893.66
+    },
+    {
+      "code": "SPTS",
+      "name": "St. Peters - Mid Rivers",
+      "region": "East",
+      "status": "Continuing",
+      "base_sales": 1183374.72
+    },
+    {
+      "code": "STRS",
+      "name": "St. Robert - Marshall",
+      "region": "East",
+      "status": "Continuing",
+      "base_sales": 1031634.11
+    },
+    {
+      "code": "WATS",
+      "name": "Sunset Hills - Watson",
+      "region": "East",
+      "status": "Continuing",
+      "base_sales": 870862.77
+    },
+    {
+      "code": "TOPE",
+      "name": "Topeka - 21st St",
+      "region": "West",
+      "status": "Continuing",
+      "base_sales": 833158.75
+    },
+    {
+      "code": "UNIS",
+      "name": "University City - Olive",
+      "region": "East",
+      "status": "Continuing",
+      "base_sales": 1365211.02
+    },
+    {
+      "code": "WALD",
+      "name": "Waldo - Wornall",
+      "region": "West",
+      "status": "Continuing",
+      "base_sales": 751177.52
+    },
+    {
+      "code": "WASS",
+      "name": "Washington - Highway 100",
+      "region": "East",
+      "status": "Continuing",
+      "base_sales": 1317059.57
+    },
+    {
+      "code": "WENS",
+      "name": "Wentzville - Wentzville Pkwy",
+      "region": "East",
+      "status": "Continuing",
+      "base_sales": 1584620.87
+    }
+  ],
+  "dow_presets": {
+    "recommended": {
+      "Monday": 0.1341,
+      "Tuesday": 0.1298,
+      "Wednesday": 0.1302,
+      "Thursday": 0.1301,
+      "Friday": 0.1561,
+      "Saturday": 0.1898,
+      "Sunday": 0.13
+    },
+    "excel_plan": {
+      "Monday": 0.1392,
+      "Tuesday": 0.1289,
+      "Wednesday": 0.1237,
+      "Thursday": 0.1392,
+      "Friday": 0.1495,
+      "Saturday": 0.1959,
+      "Sunday": 0.1237
+    },
+    "even": {
+      "Monday": 0.14285714285714285,
+      "Tuesday": 0.14285714285714285,
+      "Wednesday": 0.14285714285714285,
+      "Thursday": 0.14285714285714285,
+      "Friday": 0.14285714285714285,
+      "Saturday": 0.14285714285714285,
+      "Sunday": 0.14285714285714285
+    }
+  },
+  "holidays_2027": [
+    {
+      "date": "2027-01-01",
+      "label": "New Year's Day"
+    },
+    {
+      "date": "2027-03-28",
+      "label": "Easter"
+    },
+    {
+      "date": "2027-07-04",
+      "label": "July 4th"
+    },
+    {
+      "date": "2027-11-25",
+      "label": "Thanksgiving"
+    },
+    {
+      "date": "2027-12-24",
+      "label": "Christmas Eve"
+    },
+    {
+      "date": "2027-12-25",
+      "label": "Christmas Day"
+    }
+  ]
+}

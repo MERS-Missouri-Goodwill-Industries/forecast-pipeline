@@ -1,0 +1,40 @@
+@import 'tailwindcss';
+
+:root {
+  --mers-blue: #0065a4;
+  --mers-amber: #fd9d0d;
+  --mers-crimson: #c1272d;
+  --mers-olive: #82c341;
+  --mers-lavender: #929cd0;
+  --mers-navy: #00263e;
+  --mers-slate: #404448;
+  --mers-ice: #cce8f5;
+  --mers-white: #ffffff;
+  --mers-canvas: #f0f6fb;
+  --mers-good: #1e592f;
+  --mers-neutral: #fbd54b;
+  --mers-secondary-bg: #8fd0ff;
+}
+
+body {
+  background-color: var(--mers-canvas);
+  color: var(--mers-slate);
+  font-family: DIN, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  margin: 0;
+}
+
+.mers-card {
+  background: var(--mers-white);
+  border: 1px solid var(--mers-ice);
+  border-radius: 0.75rem;
+  box-shadow: 0 1px 3px rgba(0, 38, 62, 0.08);
+}
+
+.mers-scrollbar::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.mers-scrollbar::-webkit-scrollbar-thumb {
+  background: var(--mers-ice);
+  border-radius: 4px;
+}

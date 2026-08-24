@@ -1,0 +1,11 @@
+# Secrets — never commit or deploy
+.env
+.env.local
+
+node_modules/
+*.log
+.DS_Store
+
+# dist/ IS committed on purpose: Databricks Apps serves the built UI directly and
+# npm-install behaviour for Node apps is undocumented, so the app must not need a
+# build step at deploy time. Rebuild with `npm run build` before committing.

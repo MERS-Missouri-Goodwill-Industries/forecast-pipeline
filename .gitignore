@@ -216,3 +216,11 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# --- Databricks Apps -------------------------------------------------------------
+# node_modules stays out; the built UI must ship so the app serves without a build step.
+node_modules/
+!apps/sales-planning-node/dist/
+!apps/sales-planning-node/dist/**
+.env
+.env.local
