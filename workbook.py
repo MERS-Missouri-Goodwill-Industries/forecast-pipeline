@@ -79,6 +79,46 @@ def tab_name(store: dict) -> str:
     return f"{store['code']} - {store['name']}"[:31]
 
 
+def _autofit_columns(ws, min_width: int = 8, max_width: int = 32, padding: int = 2) -> None:
+    """Approximate Excel's AutoFit column width.
+
+    openpyxl never renders formulas, so a formula cell's source text (a 70-character
+    IF/SUMPRODUCT expression, say) is not what a reader sees on the page -- its number
+    format is. Widths are estimated from that instead. Note-font cells are skipped: they
+    are meant to overflow into the empty cells beside them, not to size the whole column
+    around themselves.
+    """
+    widths: dict[str, int] = {}
+    for row in ws.iter_rows():
+        for cell in row:
+            value = cell.value
+            if value is None or cell.font == NOTE_FONT:
+                continue
+            if isinstance(value, str) and value.startswith("="):
+                fmt = cell.number_format or ""
+                if "$" in fmt:
+                    length = 14
+                elif "%" in fmt:
+                    length = 9
+                elif fmt == "yyyy-mm-dd":
+                    length = 11
+                else:
+                    length = 10
+            elif isinstance(value, bool):
+                length = 5
+            elif isinstance(value, (int, float)):
+                length = len(f"{value:,.0f}")
+            elif hasattr(value, "isoformat"):
+                length = 11
+            else:
+                length = len(str(value))
+            col = cell.column_letter
+            widths[col] = max(widths.get(col, 0), length)
+
+    for col, length in widths.items():
+        ws.column_dimensions[col].width = max(min_width, min(max_width, length + padding))
+
+
 def build_workbook(
     *,
     year: int,
@@ -398,10 +438,6 @@ def _store_tab(wb: Workbook, store: dict, plan_row: int, days: list[dict],
                ranges: list[tuple[int, int]], daily_total_row: int, df_last: int,
                override: dict, year: int) -> None:
     s = wb.create_sheet(tab_name(store))
-    for col, w in [("A", 14), ("B", 14), ("C", 18), ("D", 20), ("E", 16),
-                   ("F", 18), ("G", 12), ("H", 20), ("I", 18),
-                   ("Q", 14), ("S", 24), ("T", 16), ("V", 14), ("W", 14), ("X", 16)]:
-        s.column_dimensions[col].width = w
     month_cols = ["E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P"]
 
     closures = override.get("closures", []) or []
@@ -506,6 +542,7 @@ def _store_tab(wb: Workbook, store: dict, plan_row: int, days: list[dict],
         "Yellow cells with blue text are yours to change — the COO Adjusted Plan column. "
         "Monthly totals add up the daily rows, so clearing days moves the month and the year."
     )
+    _autofit_columns(s)
     s.freeze_panes = "A9"
 
 
