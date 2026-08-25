@@ -29,14 +29,14 @@
       "base_sales": 993212.25
     },
     {
-      "code": "BLUE",
+      "code": "BLSS",
       "name": "Blue Springs - MO-7",
       "region": "West",
       "status": "Continuing",
       "base_sales": 578776.17
     },
     {
-      "code": "BONN",
+      "code": "BOSS",
       "name": "Bonner Springs - 129th St",
       "region": "West",
       "status": "Continuing",
@@ -92,7 +92,7 @@
       "base_sales": 2533079.25
     },
     {
-      "code": "EURE",
+      "code": "EURS",
       "name": "Eureka - Thresher",
       "region": "East",
       "status": "New store",
@@ -106,7 +106,7 @@
       "base_sales": 1431705.44
     },
     {
-      "code": "FENS",
+      "code": "FETS",
       "name": "Fenton - Gravois Bluffs",
       "region": "East",
       "status": "Continuing",
@@ -162,21 +162,21 @@
       "base_sales": 880135.84
     },
     {
-      "code": "KANS",
+      "code": "BRYS",
       "name": "Kansas City - E 63rd",
       "region": "West",
       "status": "Continuing",
       "base_sales": 466549.05
     },
     {
-      "code": "KANC",
+      "code": "MIDS",
       "name": "Kansas City - Main St",
       "region": "West",
       "status": "Continuing",
       "base_sales": 596186.71
     },
     {
-      "code": "KACI",
+      "code": "NORS",
       "name": "Kansas City - N Oak",
       "region": "West",
       "status": "Continuing",
@@ -190,14 +190,14 @@
       "base_sales": 1524948.34
     },
     {
-      "code": "LAWR",
+      "code": "LAWS",
       "name": "Lawrence - 31st St",
       "region": "West",
       "status": "Continuing",
       "base_sales": 1115465.03
     },
     {
-      "code": "LEAV",
+      "code": "LEAS",
       "name": "Leavenworth - Broadway",
       "region": "West",
       "status": "Continuing",
@@ -211,7 +211,7 @@
       "base_sales": 776925.4
     },
     {
-      "code": "LIBE",
+      "code": "LIBS",
       "name": "Liberty - N Cedar",
       "region": "West",
       "status": "Continuing",
@@ -225,7 +225,7 @@
       "base_sales": 1216452.97
     },
     {
-      "code": "MANH",
+      "code": "MAHS",
       "name": "Manhattan - Poyntz",
       "region": "West",
       "status": "Continuing",
@@ -253,35 +253,35 @@
       "base_sales": 1193971.13
     },
     {
-      "code": "OFAL",
+      "code": "OFIS",
       "name": "O'Fallon - Auto Court",
       "region": "East",
       "status": "Continuing",
       "base_sales": 1208732.5
     },
     {
-      "code": "OFAH",
+      "code": "OFAS",
       "name": "O'Fallon - Highway K",
       "region": "East",
       "status": "Continuing",
       "base_sales": 1152368.08
     },
     {
-      "code": "OFAM",
+      "code": "OFKS",
       "name": "O'Fallon - Market Center",
       "region": "East",
       "status": "New store",
       "base_sales": 0
     },
     {
-      "code": "OLAT",
+      "code": "OLAS",
       "name": "Olathe - Strang Line",
       "region": "West",
       "status": "Continuing",
       "base_sales": 685120.5
     },
     {
-      "code": "OUTL",
+      "code": "BANS",
       "name": "Outlet - Bannister",
       "region": "West",
       "status": "Continuing",
@@ -295,14 +295,14 @@
       "base_sales": 1881967.19
     },
     {
-      "code": "OUTM",
+      "code": "BROS",
       "name": "Outlet - Mills",
       "region": "East",
       "status": "Continuing",
       "base_sales": 1731046.17
     },
     {
-      "code": "OVER",
+      "code": "OVES",
       "name": "Overland Park - 135th St",
       "region": "West",
       "status": "Continuing",
@@ -316,7 +316,7 @@
       "base_sales": 1313379.17
     },
     {
-      "code": "PITT",
+      "code": "PITS",
       "name": "Pittsburg - Broadway",
       "region": "West",
       "status": "Continuing",
@@ -337,7 +337,7 @@
       "base_sales": 1444286.59
     },
     {
-      "code": "SHAW",
+      "code": "SHAS",
       "name": "Shawnee - Mission Pkwy",
       "region": "West",
       "status": "Continuing",
@@ -358,14 +358,14 @@
       "base_sales": 1934135.44
     },
     {
-      "code": "SPRI",
+      "code": "SPBS",
       "name": "Springfield - Kansas Pkwy",
       "region": "East",
       "status": "Continuing",
       "base_sales": 2002651.32
     },
     {
-      "code": "SPRW",
+      "code": "SPCS",
       "name": "Springfield - Western Ave",
       "region": "East",
       "status": "Continuing",
@@ -379,7 +379,7 @@
       "base_sales": 1113568.23
     },
     {
-      "code": "STJ",
+      "code": "SJOS",
       "name": "St. Joseph - Faraon",
       "region": "West",
       "status": "Continuing",
@@ -421,7 +421,7 @@
       "base_sales": 870862.77
     },
     {
-      "code": "TOPE",
+      "code": "TOPS",
       "name": "Topeka - 21st St",
       "region": "West",
       "status": "Continuing",
@@ -435,7 +435,7 @@
       "base_sales": 1365211.02
     },
     {
-      "code": "WALD",
+      "code": "WALS",
       "name": "Waldo - Wornall",
       "region": "West",
       "status": "Continuing",

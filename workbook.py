@@ -87,9 +87,10 @@ def build_workbook(
     holidays: list[dict],
     recommended_plan: float,
     store_overrides: dict[str, dict] | None = None,
-    session_name: str = "POC Prototype 2027 Planned Sales Workbook",
+    session_name: str | None = None,
     author: str = "vyamaykin@mersgoodwill.org",
 ) -> Workbook:
+    session_name = session_name or f"POC Prototype {year} Planned Sales Workbook"
     overrides = store_overrides or {}
     days = build_day_factors(year, weights, holidays)
     ranges = month_row_ranges(days, FIRST_DAILY_ROW)
@@ -112,7 +113,7 @@ def build_workbook(
 
     for idx, store in enumerate(stores):
         _store_tab(wb, store, store_start + idx, days, ranges, daily_total_row,
-                   df_last, overrides.get(store["code"], {}))
+                   df_last, overrides.get(store["code"], {}), year)
 
     _exec_summary(wb, ex, session_name, stores, year)
     _all_stores_summary(wb, al, stores, store_start)
@@ -395,7 +396,7 @@ def _plan_inputs(wb: Workbook, stores: list[dict], recommended_plan: float,
 # --- store tab -------------------------------------------------------------------------
 def _store_tab(wb: Workbook, store: dict, plan_row: int, days: list[dict],
                ranges: list[tuple[int, int]], daily_total_row: int, df_last: int,
-               override: dict) -> None:
+               override: dict, year: int) -> None:
     s = wb.create_sheet(tab_name(store))
     for col, w in [("A", 14), ("B", 14), ("C", 18), ("D", 20), ("E", 16),
                    ("F", 18), ("G", 12), ("H", 20), ("I", 18),
@@ -408,7 +409,7 @@ def _store_tab(wb: Workbook, store: dict, plan_row: int, days: list[dict],
     has_closures = bool(closures)
     closures_end = 1 + max(1, len(closures))
 
-    for i, h in enumerate(["Store Code", "Store Name", "POS", "2027 Planned Sales"]):
+    for i, h in enumerate(["Store Code", "Store Name", "POS", f"{year} Planned Sales"]):
         _hdr(s.cell(1, i + 1)).value = h
     for m, name in enumerate(MONTH_NAMES):
         _hdr(s[f"{month_cols[m]}1"]).value = name[:3]

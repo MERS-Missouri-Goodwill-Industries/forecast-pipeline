@@ -48,6 +48,15 @@ def is_leap(year: int) -> bool:
     return (year % 4 == 0 and year % 100 != 0) or year % 400 == 0
 
 
+def weekday_counts(year: int) -> dict[str, int]:
+    """How many times each weekday falls in the given calendar year (52 or 53)."""
+    counts = {d: 0 for d in WEEKDAYS}
+    start = dt.date(year, 1, 1)
+    for i in range(366 if is_leap(year) else 365):
+        counts[WEEKDAYS[(start + dt.timedelta(days=i)).weekday()]] += 1
+    return counts
+
+
 def easter(year: int) -> dt.date:
     """Anonymous Gregorian algorithm. Easter 2027 = 28 March."""
     a = year % 19
