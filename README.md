@@ -10,13 +10,15 @@ Problem Statement
 - Hardest part is not annual total. It is redistributing an approved total across months and days when calendar shifts each year: extra Saturdays, manager movement, weekday-of-month-start, etc.
 
 Requirements
-Stage 1, Excel recommendation. Store-grain baseline from history. Excel workbook read-only artifact Mark takes into planning with Kristy and Kelly.
 
-Stage 2, Improved Planned Sales. Mark updates the planned sales and gives back the budget to data team.
+1. Stage 1, Excel recommendation. Store-grain baseline from history. Excel workbook read-only artifact Mark takes into planning with Kristy and Kelly.
 
-Stage 3, Power BI Monitoring. Analyze the accuracy of forecast, improved planned sales, and actuals together in one report.
+2. Stage 2, Improved Planned Sales. Mark updates the planned sales and gives back the budget to data team.
+
+3. Stage 3, Power BI Monitoring. Analyze the accuracy of forecast, improved planned sales, and actuals together in one report.
+
 Measure of Success
-
+---------------------------
 - Cycle time to published daily goals drops from days of Excel work to a few hours.
 
 Definition of Done
