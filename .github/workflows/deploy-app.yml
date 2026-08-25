@@ -5,10 +5,26 @@ on:
     branches: [main]
     paths:
       - "apps/**"
+      - "app.py"
+      - "app.yaml"
+      - "databricks_io.py"
+      - "forecast_engine.py"
+      - "workbook.py"
+      - "seed_data.json"
+      - "requirements.txt"
+      - "tests/**"
       - ".github/workflows/deploy-app.yml"
   pull_request:
     paths:
       - "apps/**"
+      - "app.py"
+      - "app.yaml"
+      - "databricks_io.py"
+      - "forecast_engine.py"
+      - "workbook.py"
+      - "seed_data.json"
+      - "requirements.txt"
+      - "tests/**"
   workflow_dispatch:
     inputs:
       app:
@@ -70,16 +86,13 @@ jobs:
   validate-python:
     name: Validate Python app
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: apps/sales-planning-python
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: pip
-          cache-dependency-path: apps/sales-planning-python/requirements.txt
+          cache-dependency-path: requirements.txt
 
       - name: Install
         run: pip install -r requirements.txt
@@ -105,7 +118,7 @@ jobs:
         id: pick
         run: |
           if [ "${{ inputs.app }}" = "python" ]; then
-            echo "dir=apps/sales-planning-python" >> "$GITHUB_OUTPUT"
+            echo "dir=." >> "$GITHUB_OUTPUT"
           else
             echo "dir=apps/sales-planning-node" >> "$GITHUB_OUTPUT"
           fi

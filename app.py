@@ -33,8 +33,7 @@ STORES = SEED["stores"]
 PRESETS = SEED["dow_presets"]
 PRESET_LABELS = {
     "recommended": "Recommended (from Actuals)",
-    "excel_plan": "Current Excel Plan",
-    "even": "Even Split",
+    "excel_plan": "2026 Weights (COO Workbook)",
 }
 
 st.set_page_config(page_title="Sales Planning", layout="wide")
@@ -151,14 +150,15 @@ with c1:
     st.subheader("Day-of-Week Weighting")
     preset = st.selectbox("Preset", list(PRESET_LABELS) + ["custom"],
                           format_func=lambda k: PRESET_LABELS.get(k, "Custom"),
-                          index=list(PRESET_LABELS).index(ss.preset) if ss.preset in PRESET_LABELS else 3)
+                          index=list(PRESET_LABELS).index(ss.preset) if ss.preset in PRESET_LABELS
+                          else len(PRESET_LABELS))
     if preset != ss.preset:
         ss.preset = preset
         if preset in PRESETS:
             ss.weights = normalize_weights(PRESETS[preset])
             ss.weights_raw = {d: round(ss.weights[d] * 100, 2) / 100 for d in WEEKDAYS}
             for d in WEEKDAYS:
-                ss.pop(f"w_{d}", None)
+                ss[f"w_{d}"] = round(ss.weights[d] * 100, 2)
         st.rerun()
 
     new_weights = {}
@@ -174,7 +174,8 @@ with c1:
         ss.preset = "custom"
         st.rerun()
 
-    st.success(f"Total: {sum(ss.weights.values()) * 100:.2f}%")
+    total_raw = sum(ss.weights_raw.values())
+    st.write(f"Total: {total_raw * 100:.2f}%")
 
     st.subheader("Recommended Plan")
     plan = st.number_input("Network plan ($)", min_value=0.0,
