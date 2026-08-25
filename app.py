@@ -184,9 +184,9 @@ with c1:
         ss.recommended_plan = plan
         st.rerun()
 
-    variance = coo_total - ss.recommended_plan
-    st.metric("COO Adjusted Plan", f"${coo_total:,.0f}",
-              delta=None if abs(variance) < 0.5 else f"${variance:,.0f}")
+    st.subheader("COO Adjusted Plan")
+    st.caption("This is the total sales goal that will be in the downloaded workbook.")
+    st.success(f"${coo_total:,.0f}")
 
 with c2:
     st.subheader("Weekday Mix — Normalized % of Week")
