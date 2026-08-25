@@ -150,7 +150,7 @@ with c2:
 
 # --- per-store --------------------------------------------------------------------------
 st.subheader("Stores")
-st.caption("Set a COO Adjusted Plan Base to override a store. Leave blank to accept the forecast.")
+st.caption("Click inside the cell under 'COO Adjusted' to override the recommended planned sales. Leave blank to accept the forecast.")
 edited = st.data_editor(
     [{"Code": s["code"], "Store": s["name"], "Region": s["region"], "Status": s["status"],
       "Forecasted": round(forecasted.get(s["code"], 0.0), 2),
@@ -160,7 +160,7 @@ edited = st.data_editor(
     hide_index=True, use_container_width=True, height=380,
     disabled=["Code", "Store", "Region", "Status", "Forecasted", "Variance"],
     column_config={
-        "Forecasted": st.column_config.NumberColumn(format="$%.0f"),
+        "Recommended Sales Goal": st.column_config.NumberColumn(format="$%.0f"),
         "COO Adjusted": st.column_config.NumberColumn(format="$%.0f"),
         "Variance": st.column_config.NumberColumn(format="$%.0f"),
     },
@@ -180,8 +180,8 @@ if st.button("Build Workbook", type="primary"):
             store_overrides={c: {"plan_base": v} for c, v in ss.overrides.items()},
         )
     st.download_button(
-        "Download POC_Prototype_2027_Planned_Sales_Workbook_2027.xlsx",
+        "Download Prototype_2027_Planned_Sales_Workbook_2027.xlsx",
         data=data,
-        file_name="POC_Prototype_2027_Planned_Sales_Workbook_2027.xlsx",
+        file_name="Prototype_2027_Planned_Sales_Workbook_2027.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
