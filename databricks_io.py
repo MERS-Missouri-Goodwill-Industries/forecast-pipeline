@@ -15,7 +15,7 @@ import re
 from datetime import datetime, timezone
 
 SCHEMA = "gold.retail_data_science"
-FORECAST_TABLE = f"{SCHEMA}.aggregate_sales_forecast"
+FORECAST_TABLE = f"{SCHEMA}.test_agg_sales_forecast"
 SCENARIOS_TABLE = f"{SCHEMA}.published_planning_scenarios"
 
 

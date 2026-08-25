@@ -330,7 +330,7 @@ def test_databricks_parsing_and_reconciliation():
     )
 
     assert io.auth_mode() in {"mock", "pat", "oauth"}
-    assert io.FORECAST_TABLE == "gold.retail_data_science.aggregate_sales_forecast"
+    assert io.FORECAST_TABLE == "gold.retail_data_science.test_agg_sales_forecast"
 
 
 if __name__ == "__main__":
