@@ -1,4 +1,4 @@
-"""FY2027 Sales Planning — Databricks App entry point.
+"""Sales Planning — Databricks App entry point.
 
 Launched by app.yaml:
     streamlit run app.py --server.port $DATABRICKS_APP_PORT --server.address 0.0.0.0
@@ -6,16 +6,28 @@ Launched by app.yaml:
 
 from __future__ import annotations
 
+import datetime as dt
+
+import altair as alt
+import pandas as pd
 import streamlit as st
 
 import databricks_io as dbx
 from forecast_engine import (
     WEEKDAYS, build_day_factors, build_store_plan, compute_forecasted_bases,
-    default_holidays, load_seed, weekday_mix,
+    default_holidays, load_seed, normalize_weights, weekday_counts, weekday_mix,
 )
 from workbook import workbook_bytes
 
-YEAR = 2027
+MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+              "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+# Planning starts at FY2027. One more year unlocks every January 1st.
+FIRST_YEAR = 2027
+AVAILABLE_YEARS = list(range(FIRST_YEAR, max(FIRST_YEAR, dt.date.today().year) + 1))
+
+OUTLET_CODES = {"BANS", "BROS", "OUTS"}
+
 SEED = load_seed()
 STORES = SEED["stores"]
 PRESETS = SEED["dow_presets"]
@@ -25,13 +37,16 @@ PRESET_LABELS = {
     "even": "Even Split",
 }
 
-st.set_page_config(page_title="FY2027 Sales Planning", layout="wide")
+st.set_page_config(page_title="Sales Planning", layout="wide")
 
 
 def _init():
     ss = st.session_state
-    ss.setdefault("weights", dict(PRESETS["recommended"]))
+    ss.setdefault("year", AVAILABLE_YEARS[-1])
     ss.setdefault("preset", "recommended")
+    if "weights" not in ss:
+        ss.weights = normalize_weights(PRESETS.get(ss.preset, PRESETS["recommended"]))
+    ss.setdefault("weights_raw", {d: round(ss.weights.get(d, 0.0) * 100, 2) / 100 for d in WEEKDAYS})
     ss.setdefault("recommended_plan", 150_000_000.0)
     ss.setdefault("overrides", {})
     ss.setdefault("db_forecasts", {})
@@ -40,15 +55,27 @@ def _init():
 
 _init()
 ss = st.session_state
+if ss.year not in AVAILABLE_YEARS:
+    ss.year = AVAILABLE_YEARS[-1]
 
 # --- header -----------------------------------------------------------------------------
-left, right = st.columns([3, 1])
+# Resolve the Planning Year selector before anything reads YEAR, so the title and every
+# downstream calculation are guaranteed to reflect the selection in this same run.
+left, mid, right = st.columns([2.6, 1, 1.4])
+with mid:
+    year = st.selectbox("Planning Year", AVAILABLE_YEARS,
+                        index=AVAILABLE_YEARS.index(ss.year), key="year_select")
+ss.year = year
+YEAR = ss.year
 with left:
-    st.title("MERS Goodwill — FY2027 Sales Planning")
+    st.title(f"MERS Goodwill — FY{YEAR} Sales Planning")
     st.caption("Recommendation workbook generator. Every exported cell is a live formula.")
 with right:
     mode = dbx.auth_mode()
-    st.success("Databricks Live") if mode != "mock" else st.warning("Local / Mock Data")
+    if mode != "mock":
+        st.success("Databricks Live")
+    else:
+        st.warning("Local / Mock Data")
     st.caption(f"auth: {mode}")
 
     if st.button("Run Forecast", type="primary", use_container_width=True):
@@ -86,6 +113,37 @@ forecasted = {**algorithmic, **ss.db_forecasts}
 effective = {c: ss.overrides.get(c, forecasted.get(c, 0.0)) for c in forecasted}
 coo_total = sum(effective.values())
 
+# --- export ------------------------------------------------------------------------------
+st.markdown(
+    """
+    <style>
+    div.st-key-export_build button {
+        box-shadow: 0 6px 14px rgba(0, 0, 0, 0.35);
+        font-weight: 600;
+        font-size: 1.05rem;
+        padding: 0.6rem 1rem;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+st.subheader("Export")
+with st.container(key="export_build"):
+    if st.button("📥  Build Workbook", type="primary", use_container_width=True):
+        with st.spinner("Generating 73 sheets…"):
+            data = workbook_bytes(
+                year=YEAR, stores=STORES, weights=ss.weights, holidays=holidays,
+                recommended_plan=ss.recommended_plan,
+                store_overrides={c: {"plan_base": v} for c, v in ss.overrides.items()},
+            )
+        file_name = f"POC_Prototype_{YEAR}_Planned_Sales_Workbook_{YEAR}.xlsx"
+        st.download_button(
+            f"Download {file_name}",
+            data=data,
+            file_name=file_name,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
 # --- controls ---------------------------------------------------------------------------
 c1, c2 = st.columns([1, 2])
 
@@ -97,7 +155,10 @@ with c1:
     if preset != ss.preset:
         ss.preset = preset
         if preset in PRESETS:
-            ss.weights = dict(PRESETS[preset])
+            ss.weights = normalize_weights(PRESETS[preset])
+            ss.weights_raw = {d: round(ss.weights[d] * 100, 2) / 100 for d in WEEKDAYS}
+            for d in WEEKDAYS:
+                ss.pop(f"w_{d}", None)
         st.rerun()
 
     new_weights = {}
@@ -107,12 +168,13 @@ with c1:
             value=round(ss.weights.get(d, 0.0) * 100, 2), step=0.01, format="%.2f",
             key=f"w_{d}",
         ) / 100
-    if new_weights != ss.weights:
-        ss.weights, ss.preset = new_weights, "custom"
+    if new_weights != ss.weights_raw:
+        ss.weights_raw = new_weights
+        ss.weights = normalize_weights(new_weights)
+        ss.preset = "custom"
         st.rerun()
 
-    total = sum(ss.weights.values())
-    (st.success if abs(total - 1) < 5e-4 else st.warning)(f"Total: {total * 100:.2f}%")
+    st.success(f"Total: {sum(ss.weights.values()) * 100:.2f}%")
 
     st.subheader("Recommended Plan")
     plan = st.number_input("Network plan ($)", min_value=0.0,
@@ -138,50 +200,56 @@ with c2:
     st.caption(f"Weekend (Sat+Sun) {wknd * 100:.1f}%  ·  Weekday (Mon–Fri) {(1 - wknd) * 100:.1f}%"
                "  ·  The same seven values for every store, all year.")
 
-    st.subheader("Monthly Plan")
-    network = build_store_plan(coo_total, days)
-    st.dataframe(
-        [{"Month": m, "Planned Sales": f"${network['monthly'][i]:,.0f}"}
-         for i, m in enumerate(
-             ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
-              "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"])],
-        hide_index=True, use_container_width=True, height=250,
+    st.subheader("Selling Days by Weekday")
+    context_years = [YEAR - 2, YEAR - 1, YEAR, YEAR + 1]
+    counts = pd.DataFrame({str(y): weekday_counts(y) for y in context_years}, index=WEEKDAYS)
+    counts.loc["Total Days"] = counts.sum()
+    styled = (
+        counts.style
+        .map(lambda v: "color:#c0392b; font-weight:700" if v == 53 else "")
+        .set_properties(subset=[str(YEAR)], **{"background-color": "rgba(31,119,180,0.12)"})
+        .format("{:.0f}")
     )
+    st.dataframe(styled, use_container_width=True)
+    st.caption(f"FY{YEAR} highlighted. A weekday in red occurs 53 times that year instead of "
+               "the usual 52 — the extra selling day to weight for.")
+
+    st.subheader("Planned Sales Comparison")
+    recommended_monthly = build_store_plan(ss.recommended_plan, days)["monthly"]
+    coo_monthly = build_store_plan(coo_total, days)["monthly"]
+    chart_df = pd.DataFrame({
+        "Month": MONTH_ABBR * 2,
+        "Series": ["Recommended Plan"] * 12 + ["COO Adjusted Plan"] * 12,
+        "Planned Sales": recommended_monthly + coo_monthly,
+    })
+    chart = alt.Chart(chart_df).mark_line(point=True).encode(
+        x=alt.X("Month", sort=MONTH_ABBR, title=None),
+        y=alt.Y("Planned Sales", title="Planned Sales ($)"),
+        color=alt.Color("Series", title=None),
+        tooltip=["Month", "Series", "Planned Sales"],
+    )
+    st.altair_chart(chart, use_container_width=True)
 
 # --- per-store --------------------------------------------------------------------------
 st.subheader("Stores")
-st.caption("Click inside the cell under 'COO Adjusted' to override the recommended planned sales. Leave blank to accept the forecast.")
+st.caption("Set a COO Adjusted Plan Base to override a store. Leave blank to accept the forecast.")
 edited = st.data_editor(
-    [{"Code": s["code"], "Store": s["name"], "Region": s["region"], "Status": s["status"],
-      "Recommended Sales Goal": round(forecasted.get(s["code"], 0.0), 2),
+    [{"Code": s["code"], "Store": s["name"], "Region": s["region"],
+      "Location Type": "Outlet" if s["code"] in OUTLET_CODES else "Store",
+      "Status": s["status"],
+      "Forecasted": round(forecasted.get(s["code"], 0.0), 2),
       "COO Adjusted": ss.overrides.get(s["code"]),
       "Variance": round(effective.get(s["code"], 0.0) - forecasted.get(s["code"], 0.0), 2)}
      for s in STORES],
     hide_index=True, use_container_width=True, height=380,
-    disabled=["Code", "Store", "Region", "Status", "Recommended Sales Goal", "Variance"],
+    disabled=["Code", "Store", "Region", "Location Type", "Status", "Forecasted", "Variance"],
     column_config={
-        "Recommended Sales Goal": st.column_config.NumberColumn(format="$%.0f"),
+        "Forecasted": st.column_config.NumberColumn(format="$%.0f"),
         "COO Adjusted": st.column_config.NumberColumn(format="$%.0f"),
         "Variance": st.column_config.NumberColumn(format="$%.0f"),
     },
 )
-new_over = {r["Code"]: float(r["COO Adjusted"]) for r in edited if r["COO Adjusted"] is not None}
+new_over = {r["Code"]: float(r["COO Adjusted"]) for r in edited if pd.notna(r["COO Adjusted"])}
 if new_over != ss.overrides:
     ss.overrides = new_over
     st.rerun()
-
-# --- export -----------------------------------------------------------------------------
-st.subheader("Export")
-if st.button("Build Workbook", type="primary"):
-    with st.spinner("Generating 73 sheets…"):
-        data = workbook_bytes(
-            year=YEAR, stores=STORES, weights=ss.weights, holidays=holidays,
-            recommended_plan=ss.recommended_plan,
-            store_overrides={c: {"plan_base": v} for c, v in ss.overrides.items()},
-        )
-    st.download_button(
-        "Download Prototype_2027_Planned_Sales_Workbook_2027.xlsx",
-        data=data,
-        file_name="Prototype_2027_Planned_Sales_Workbook_2027.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
