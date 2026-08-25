@@ -153,12 +153,12 @@ st.subheader("Stores")
 st.caption("Click inside the cell under 'COO Adjusted' to override the recommended planned sales. Leave blank to accept the forecast.")
 edited = st.data_editor(
     [{"Code": s["code"], "Store": s["name"], "Region": s["region"], "Status": s["status"],
-      "Forecasted": round(forecasted.get(s["code"], 0.0), 2),
+      "Recommended Sales Goal": round(forecasted.get(s["code"], 0.0), 2),
       "COO Adjusted": ss.overrides.get(s["code"]),
       "Variance": round(effective.get(s["code"], 0.0) - forecasted.get(s["code"], 0.0), 2)}
      for s in STORES],
     hide_index=True, use_container_width=True, height=380,
-    disabled=["Code", "Store", "Region", "Status", "Forecasted", "Variance"],
+    disabled=["Code", "Store", "Region", "Status", "Recommended Sales Goal", "Variance"],
     column_config={
         "Recommended Sales Goal": st.column_config.NumberColumn(format="$%.0f"),
         "COO Adjusted": st.column_config.NumberColumn(format="$%.0f"),
