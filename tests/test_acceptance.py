@@ -205,8 +205,8 @@ def _wb(subset=None, overrides=None):
 
 def test_workbook_shape():
     wb = _wb(STORES[:3])
-    expected = ["How_To_Use", "Exec_Summary", "All_Stores_Summary", "Monthly_Matrix",
-                "Daily_Disaggregated_Plan", "Calendar_Inputs", "Day_Factors", "Plan_Inputs"]
+    expected = ["How_To_Use", "Exec Calendar Inputs", "All_Stores_Summary", "Monthly_Matrix",
+                "Daily_Disaggregated_Plan", "Final_Sales_Goals", "Day_Factors", "Plan_Inputs"]
     assert wb.sheetnames[:8] == expected
     assert len(wb.sheetnames) == 8 + 3
     assert all(len(n) <= 31 for n in wb.sheetnames), "Excel caps sheet names at 31 chars"
@@ -221,22 +221,23 @@ def test_store_tab_layout():
 
     for i, st in enumerate(stores):
         s = wb[tab_name(st)]
-        # Column C (old baseline "Recommended Sales") and H (old "Recommended Month
-        # Total") no longer carry a header or any data -- COO Adjusted Plan is the only
-        # money column on the sheet.
+        # Columns C (old baseline "Recommended Sales"), F (old "Holiday"), and H (old
+        # "Recommended Month Total") no longer carry a header or any data -- COO Adjusted
+        # Plan is the only money column on the sheet.
         assert [s.cell(8, c).value for c in range(1, 10)] == [
             "Date", "Day of Week", None, "COO Adjusted Plan",
-            "Day % of Annual", "Holiday", "Month",
+            "Day % of Annual", None, "Month",
             None, "COO Month Total"]
+        assert s["C1"].value is None and s["C2"].value is None, "no POS column"
         assert s["D2"].value is None, "no baseline 'Recommended' row"
         assert s["D3"].value == "COO Adjusted Plan"
         assert s["Q2"].value is None, "no baseline annual total"
         assert s["Q3"].value == f"=D{total_row}"
-        assert s["Q5"].value == "Diff"
+        assert s["Q5"].value is None, "no Diff label"
         assert s["Q6"].value == "=Q3-$S$2"
         assert s["S1"].value == "COO Adjusted Planned Sales"
         assert s["V1"].value == "Closure Start"
-        assert f"$E${14 + i}" in s["S2"].value
+        assert f"$E${8 + i}" in s["S2"].value
         assert s["A6"].value is None and s["B6"].value is None, "no Forecasted Plan Base"
 
         for m, (a, b) in enumerate(ranges):
@@ -249,6 +250,7 @@ def test_store_tab_layout():
 
         for r in (9, 150, total_row - 1):
             assert s[f"C{r}"].value is None
+            assert s[f"F{r}"].value is None, "no Holiday column without closures"
             assert s[f"D{r}"].value == f"=$S$2 * E{r}"
         assert s[f"C{total_row}"].value is None
         assert s[f"D{total_row}"].value == f"=SUM(D9:D{total_row - 1})"
