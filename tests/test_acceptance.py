@@ -26,7 +26,9 @@ from forecast_engine import (  # noqa: E402
     WEEKDAYS, build_day_factors, build_store_plan, compute_forecasted_bases,
     default_holidays, expand_closures, load_seed, month_row_ranges, weekday_mix,
 )
-from workbook import build_workbook, tab_name  # noqa: E402
+from workbook import (  # noqa: E402
+    build_workbook, tab_name, validate_plan, EXEC_CAL_SHEET_NAME, CAL_OFFSET,
+)
 
 YEAR = 2027
 SEED = load_seed()
@@ -186,6 +188,19 @@ def test_c8_store_closure_handling():
     assert abs(p["full_year_total"] - base) < 0.05
 
 
+def test_weekday_weight_inputs_sum_to_exactly_100_pct():
+    """Rounding each weekday's input independently can drift the total off 100% by a hair
+    (e.g. 99.9999%) even though the seven raw weights are mathematically normalized. The
+    last weekday must absorb that residual so the displayed Total is exact, not just close."""
+    O = CAL_OFFSET
+    for weights in (WEIGHTS, {d: 1.0 for d in WEEKDAYS}):  # preset, and the classic 1/7 case
+        wb = build_workbook(year=YEAR, stores=STORES[:1], weights=weights, holidays=HOLIDAYS,
+                            recommended_plan=PLAN)
+        ecx = wb[EXEC_CAL_SHEET_NAME]
+        vals = [ecx.cell(6 + i + O, 2).value for i in range(7)]
+        assert sum(vals) == 1.0, f"weekday weight inputs sum to {sum(vals)!r}, not 1.0"
+
+
 def test_weekday_mix_table():
     mix = weekday_mix(_days())
     assert len(mix) == 7
@@ -205,11 +220,76 @@ def _wb(subset=None, overrides=None):
 
 def test_workbook_shape():
     wb = _wb(STORES[:3])
-    expected = ["How_To_Use", "Exec Calendar Inputs", "All_Stores_Summary", "Monthly_Matrix",
-                "Daily_Disaggregated_Plan", "Final_Sales_Goals", "Day_Factors", "Plan_Inputs"]
-    assert wb.sheetnames[:8] == expected
-    assert len(wb.sheetnames) == 8 + 3
+    expected = ["How_To_Use", "Exec Calendar Inputs", "Data_Validation", "All_Stores_Summary",
+                "Monthly_Matrix", "Daily_Disaggregated_Plan", "Final_Sales_Goals",
+                "Day_Factors", "Plan_Inputs"]
+    assert wb.sheetnames[:9] == expected
+    assert len(wb.sheetnames) == 9 + 3
     assert all(len(n) <= 31 for n in wb.sheetnames), "Excel caps sheet names at 31 chars"
+
+
+def test_validate_plan_clean_input_is_all_ok():
+    days = _days()
+    planned = compute_forecasted_bases(STORES, PLAN)
+    results = validate_plan(STORES, planned, days, overrides={})
+    bad = [r for r in results if r["status"] != "OK"]
+    assert not bad, f"clean input flagged something: {bad}"
+
+
+def test_validate_plan_catches_duplicate_codes():
+    days = _days()
+    dup_stores = [STORES[0], {**STORES[1], "code": STORES[0]["code"]}]
+    planned = {s["code"]: 1000.0 for s in dup_stores}
+    results = validate_plan(dup_stores, planned, days, overrides={})
+    hit = next(r for r in results if r["check"] == "Store codes are unique")
+    assert hit["status"] == "ERROR"
+
+
+def test_validate_plan_catches_negative_and_swing():
+    days = _days()
+    stores = STORES[:3]
+    planned = compute_forecasted_bases(stores, PLAN)
+    planned[stores[0]["code"]] = -500.0                                   # negative
+    planned[stores[1]["code"]] = float(stores[1]["base_sales"]) * 10      # 10x swing
+
+    results = validate_plan(stores, planned, days, overrides={})
+    neg = next(r for r in results if "negative" in r["check"])
+    assert neg["status"] == "ERROR" and stores[0]["code"] in neg["detail"]
+    swing = next(r for r in results if "off its own prior-year" in r["check"])
+    assert swing["status"] == "FLAG" and stores[1]["code"] in swing["detail"]
+
+
+def test_validate_plan_catches_reversed_closure():
+    days = _days()
+    stores = STORES[:1]
+    planned = compute_forecasted_bases(stores, PLAN)
+    overrides = {stores[0]["code"]: {"closures": [
+        {"start": f"{YEAR}-06-10", "end": f"{YEAR}-06-01"}]}}   # end before start
+    results = validate_plan(stores, planned, days, overrides=overrides)
+    hit = next(r for r in results if "on or before" in r["check"])
+    assert hit["status"] == "ERROR"
+
+
+def test_build_workbook_refuses_bad_input():
+    dup_stores = [STORES[0], {**STORES[1], "code": STORES[0]["code"]}]
+    try:
+        _wb(dup_stores)
+        assert False, "build_workbook should have raised on duplicate store codes"
+    except ValueError as exc:
+        assert "unique" in str(exc)
+
+
+def test_data_validation_sheet_present_and_live():
+    wb = _wb(STORES[:3])
+    s = wb["Data_Validation"]
+    assert s["A1"].value == "Data Validation"
+    # static section: one row per validate_plan check, colour-coded by status
+    assert s["A6"].value and s["B6"].value in {"OK", "FLAG", "ERROR"}
+    # live section: one formula-driven reconciliation row per store, referencing its own Q6
+    header_row = next(r for r in range(1, 30) if s.cell(r, 1).value == "Code")
+    first_code_cell = s.cell(header_row + 1, 3).value
+    assert isinstance(first_code_cell, str) and first_code_cell.startswith("=")
+    assert "$Q$6" in first_code_cell
 
 
 def test_store_tab_layout():

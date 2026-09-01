@@ -1,4 +1,4 @@
-"""Builds the 73-sheet planning workbook.
+"""Builds the 74-sheet planning workbook.
 
 Everything is emitted as a live Excel FORMULA, never a computed value. The COO edits this
 file after export, so a pre-computed number is silently wrong the moment he changes an
@@ -19,6 +19,7 @@ from forecast_engine import (
     MONTH_NAMES,
     WEEKDAYS,
     build_day_factors,
+    build_store_plan,
     compute_forecasted_bases,
     expand_closures,
     month_row_ranges,
@@ -123,6 +124,130 @@ def _autofit_columns(ws, min_width: int = 8, max_width: int = 32, padding: int =
         ws.column_dimensions[col].width = max(min_width, min(max_width, length + padding))
 
 
+def validate_plan(
+    stores: list[dict],
+    planned_sales: dict[str, float],
+    days: list[dict],
+    overrides: dict[str, dict],
+    *,
+    swing_multiplier: float = 3.0,
+    tol: float = 0.01,
+) -> list[dict]:
+    """Sanity-check the plan before it ships. Pure Python -- no Excel involved, so this
+    runs whether or not a formula would ever get the chance to recalculate.
+
+    Returns a list of {"check", "status", "detail"} records, status one of
+    "ERROR" | "FLAG" | "OK". build_workbook refuses to generate a file over an ERROR;
+    a FLAG is a judgment call surfaced to the COO on the Data_Validation sheet, not a
+    reason to block the build.
+    """
+    results: list[dict] = []
+    codes = [s["code"] for s in stores]
+
+    dupes = sorted({c for c in codes if codes.count(c) > 1})
+    results.append({
+        "check": "Store codes are unique",
+        "status": "ERROR" if dupes else "OK",
+        "detail": f"Duplicated: {dupes}" if dupes else f"All {len(codes)} codes unique.",
+    })
+
+    missing = [c for c in codes if c not in planned_sales]
+    results.append({
+        "check": "Every store has a Planned Sales figure",
+        "status": "ERROR" if missing else "OK",
+        "detail": f"Missing for: {missing}" if missing else "All stores accounted for.",
+    })
+
+    valid_statuses = {"Continuing", "New store", "Closed"}
+    bad_status = sorted({s["code"] for s in stores if s["status"] not in valid_statuses})
+    results.append({
+        "check": "Store status is Continuing, New store, or Closed",
+        "status": "ERROR" if bad_status else "OK",
+        "detail": (f"Unrecognized status on: {bad_status}" if bad_status
+                   else "All statuses recognized."),
+    })
+
+    negative = sorted(c for c, v in planned_sales.items() if v < 0)
+    results.append({
+        "check": "No store has a negative Planned Sales figure",
+        "status": "ERROR" if negative else "OK",
+        "detail": f"Negative on: {negative}" if negative else "No negative values.",
+    })
+
+    zero_continuing = sorted(
+        s["code"] for s in stores
+        if s["status"] == "Continuing" and abs(planned_sales.get(s["code"], 0.0)) < tol
+    )
+    results.append({
+        "check": "No continuing store is committed to $0",
+        "status": "FLAG" if zero_continuing else "OK",
+        "detail": (f"$0 on: {zero_continuing} -- confirm this is a deliberate zero-out, not "
+                   "a missed override." if zero_continuing else "No unexplained $0 stores."),
+    })
+
+    swings = []
+    for s in stores:
+        base = s.get("base_sales") or 0.0
+        val = planned_sales.get(s["code"], 0.0)
+        if base > 0 and val > 0:
+            ratio = val / base
+            if ratio > swing_multiplier or ratio < 1 / swing_multiplier:
+                swings.append(f"{s['code']} ({ratio:.1f}x last year)")
+    results.append({
+        "check": f"No store's Planned Sales is more than {swing_multiplier:.0f}x off its "
+                 "own prior-year Base Sales",
+        "status": "FLAG" if swings else "OK",
+        "detail": ("Review before committing: " + "; ".join(swings)) if swings
+                   else "Every store is within a normal range of its own history.",
+    })
+
+    broken_recon = []
+    for s in stores:
+        val = planned_sales.get(s["code"], 0.0)
+        plan = build_store_plan(val, days)
+        if abs(plan["full_year_total"] - val) > tol:
+            broken_recon.append(f"{s['code']} (${plan['full_year_total']:,.2f} vs ${val:,.2f})")
+    results.append({
+        "check": "Every store's day-of-week disaggregation adds back up to its own annual "
+                 "Planned Sales",
+        "status": "ERROR" if broken_recon else "OK",
+        "detail": ("Broken on: " + "; ".join(broken_recon)) if broken_recon
+                   else f"All {len(stores)} stores reconcile to the cent.",
+    })
+
+    network_total = sum(planned_sales.values())
+    results.append({
+        "check": "Network total is the sum of every store's Planned Sales",
+        "status": "OK",
+        "detail": f"${network_total:,.0f} across {len(stores)} stores.",
+    })
+
+    plan_year = days[0]["date_obj"].year if days else None
+    reversed_ranges, outside_year = [], []
+    for s in stores:
+        for c in overrides.get(s["code"], {}).get("closures", []) or []:
+            start = dt.date.fromisoformat(c["start"])
+            end = dt.date.fromisoformat(c["end"])
+            if start > end:
+                reversed_ranges.append(f"{s['code']} ({c['start']} to {c['end']})")
+            elif plan_year and (start.year != plan_year or end.year != plan_year):
+                outside_year.append(f"{s['code']} ({c['start']} to {c['end']})")
+    results.append({
+        "check": "Every closure's start date is on or before its end date",
+        "status": "ERROR" if reversed_ranges else "OK",
+        "detail": ("Reversed range on: " + "; ".join(reversed_ranges)) if reversed_ranges
+                   else "No reversed closure ranges.",
+    })
+    results.append({
+        "check": f"Every closure falls within the plan year ({plan_year})",
+        "status": "FLAG" if outside_year else "OK",
+        "detail": (("Outside the plan year, so it has no effect: " + "; ".join(outside_year))
+                   if outside_year else "No closures fall outside the plan year."),
+    })
+
+    return results
+
+
 def build_workbook(
     *,
     year: int,
@@ -152,11 +277,20 @@ def build_workbook(
         override_base = overrides.get(st["code"], {}).get("plan_base")
         planned_sales[st["code"]] = forecasted[st["code"]] if override_base is None else override_base
 
+    validation_results = validate_plan(stores, planned_sales, days, overrides)
+    hard_errors = [r for r in validation_results if r["status"] == "ERROR"]
+    if hard_errors:
+        raise ValueError(
+            "Refusing to build a workbook over bad input data:\n"
+            + "\n".join(f"- {r['check']}: {r['detail']}" for r in hard_errors)
+        )
+
     wb = Workbook()
     wb.remove(wb.active)
 
     _how_to_use(wb, session_name, author)
     ecx = wb.create_sheet(EXEC_CAL_SHEET_NAME)
+    dv = wb.create_sheet("Data_Validation")
     al = wb.create_sheet("All_Stores_Summary")
     mm = wb.create_sheet("Monthly_Matrix")
     dd = wb.create_sheet("Daily_Disaggregated_Plan")
@@ -169,6 +303,7 @@ def build_workbook(
                    df_last, overrides.get(store["code"], {}), year)
 
     _exec_calendar_inputs(wb, ecx, session_name, stores, year, weights, holidays, df_last)
+    _data_validation(wb, dv, stores, validation_results)
     _all_stores_summary(wb, al, stores, store_start)
     _monthly_matrix(wb, mm, stores)
     _daily_feed(wb, dd, stores, days)
@@ -209,6 +344,8 @@ def _how_to_use(wb: Workbook, session_name: str, author: str) -> None:
     index = [
         ("Exec Calendar Inputs", "Top-level numbers and the monthly rollup, plus your control "
          "centre for weekday weights, holidays, and Weekday Mix."),
+        ("Data_Validation", "Sanity checks run once at generation, plus a live per-store "
+         "reconciliation that recalculates as you edit."),
         ("All_Stores_Summary", "One row per store: COO Adjusted Planned Sales, code, name, region, status."),
         ("Monthly_Matrix", "Every store's 12 months in one grid, totalling to the network."),
         ("Daily_Disaggregated_Plan", "Flat store-by-day feed for Power BI."),
@@ -508,10 +645,16 @@ def _exec_calendar_inputs(wb: Workbook, s, session_name: str, stores: list[dict]
     _hdr(s[f"A{5 + O}"]).value = "Weekday"
     _hdr(s[f"B{5 + O}"]).value = "Normalized % of Week"
     total = sum(weights.get(d, 0.0) for d in WEEKDAYS) or 1.0
+    normalized = [weights.get(d, 0.0) / total for d in WEEKDAYS]
+    # Round each independently and the sum can drift off 100% by a hair (e.g. 99.9999%).
+    # Round all but the last, then let the last absorb whatever residual is left, so the
+    # seven inputs always sum to exactly 1.0 -- not just approximately.
+    rounded = [round(v, 6) for v in normalized[:-1]]
+    rounded.append(round(1.0 - sum(rounded), 6))
     for i, d in enumerate(WEEKDAYS):
         r = 6 + i + O
         _fml(s[f"A{r}"]).value = d
-        _inp(s[f"B{r}"], PCT4).value = round(weights.get(d, 0.0) / total, 6)
+        _inp(s[f"B{r}"], PCT4).value = rounded[i]
     _hdr(s[f"A{13 + O}"]).value = "Total"
     _fml(s[f"B{13 + O}"], PCT4).value = f"=SUM(B{6 + O}:B{12 + O})"
 
@@ -678,6 +821,67 @@ def _final_sales_goals(wb: Workbook, s, stores: list[dict], days: list[dict]) ->
             _xs(s.cell(r, 3), MONEY2).value = f"={sheet_ref(name, f'$D${sr}')}"
             r += 1
     s.freeze_panes = "A2"
+
+
+_VALIDATION_FILL = {
+    "OK": PatternFill("solid", fgColor="FFC6EFCE"),
+    "FLAG": PatternFill("solid", fgColor="FFFFEB9C"),
+    "ERROR": PatternFill("solid", fgColor="FFFFC7CE"),
+}
+
+
+def _data_validation(wb: Workbook, s, stores: list[dict], results: list[dict]) -> None:
+    """Two tables: what validate_plan checked once in Python at generation time (static --
+    editing the file afterward does not change these rows), and a live per-store
+    reconciliation that recalculates every time the file is opened or edited."""
+    s.sheet_properties.tabColor = "FFCC0000"
+    s.column_dimensions["A"].width = 55
+    s.column_dimensions["B"].width = 10
+    s.column_dimensions["C"].width = 70
+    s.column_dimensions["D"].width = 12
+
+    _hdr(s["A1"], 14).value = "Data Validation"
+    _note(s["A2"]).value = (
+        "Checked at Generation (below) ran once in Python when this workbook was built -- "
+        "it will NOT change if you edit a cell. Live Reconciliation, further down, "
+        "recalculates every time you open or edit this file."
+    )
+
+    _hdr(s["A4"]).value = "Checked at Generation"
+    for i, h in enumerate(["Check", "Status", "Detail"]):
+        _hdr(s.cell(5, i + 1)).value = h
+    for i, r in enumerate(results):
+        row = 6 + i
+        s[f"A{row}"].value = r["check"]
+        cell = s[f"B{row}"]
+        cell.value = r["status"]
+        cell.font = Font(name="Arial", size=10, bold=True)
+        cell.fill = _VALIDATION_FILL.get(r["status"], PatternFill())
+        s[f"C{row}"].value = r["detail"]
+        s[f"C{row}"].alignment = Alignment(wrap_text=True)
+
+    live_title_row = 7 + len(results)
+    _hdr(s[f"A{live_title_row}"], 12).value = "Live Reconciliation — recalculates on open"
+    header_row = live_title_row + 1
+    for i, h in enumerate(["Code", "Store Name", "Q6 (should be $0.00)", "Status"]):
+        _hdr(s.cell(header_row, i + 1)).value = h
+
+    first_data_row = header_row + 1
+    for i, st in enumerate(stores):
+        row = first_data_row + i
+        name = tab_name(st)
+        _fml(s[f"A{row}"]).value = st["code"]
+        _fml(s[f"B{row}"]).value = st["name"]
+        _xs(s[f"C{row}"], MONEY2).value = f"={sheet_ref(name, '$Q$6')}"
+        _fml(s[f"D{row}"]).value = f'=IF(ABS(C{row})<0.01,"OK","CHECK")'
+
+    last_data_row = first_data_row + len(stores) - 1
+    total_row = last_data_row + 1
+    _hdr(s[f"A{total_row}"]).value = "Any store failing?"
+    _fml(s[f"D{total_row}"]).value = (
+        f'=IF(COUNTIF(D{first_data_row}:D{last_data_row},"CHECK")=0,"OK","CHECK")'
+    )
+    s.freeze_panes = "A6"
 
 
 def workbook_bytes(**kwargs) -> bytes:
