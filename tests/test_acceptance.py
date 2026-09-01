@@ -221,40 +221,44 @@ def test_store_tab_layout():
 
     for i, st in enumerate(stores):
         s = wb[tab_name(st)]
+        # Column C (old baseline "Recommended Sales") and H (old "Recommended Month
+        # Total") no longer carry a header or any data -- COO Adjusted Plan is the only
+        # money column on the sheet.
         assert [s.cell(8, c).value for c in range(1, 10)] == [
-            "Date", "Day of Week", "Recommended Sales", "COO Adjusted Plan",
+            "Date", "Day of Week", None, "COO Adjusted Plan",
             "Day % of Annual", "Holiday", "Month",
-            "Recommended Month Total", "COO Month Total"]
-        assert s["D2"].value == "Recommended"
+            None, "COO Month Total"]
+        assert s["D2"].value is None, "no baseline 'Recommended' row"
         assert s["D3"].value == "COO Adjusted Plan"
-        assert s["Q2"].value == "=SUM(E2:P2)"
+        assert s["Q2"].value is None, "no baseline annual total"
         assert s["Q3"].value == f"=D{total_row}"
         assert s["Q5"].value == "Diff"
-        assert s["Q6"].value == "=Q3-Q2"
+        assert s["Q6"].value == "=Q3-$S$2"
         assert s["S1"].value == "COO Adjusted Planned Sales"
         assert s["V1"].value == "Closure Start"
-        assert f"$H${14 + i}" in s["S2"].value
-        assert f"$F${14 + i}" in s["B6"].value
+        assert f"$E${14 + i}" in s["S2"].value
+        assert s["A6"].value is None and s["B6"].value is None, "no Forecasted Plan Base"
 
         for m, (a, b) in enumerate(ranges):
             col = "EFGHIJKLMNOP"[m]
-            assert s[f"{col}2"].value == f"=$B$6 * SUM(E{a}:E{b})"
+            assert s[f"{col}2"].value is None, "no baseline monthly row"
             # The formula the whole delete-days workflow depends on:
             assert s[f"{col}3"].value == f"=SUM(D{a}:D{b})", "row 3 must SUM the daily COO column"
-            assert s[f"H{b}"].value == f"=SUM(C{a}:C{b})"
+            assert s[f"H{b}"].value is None
             assert s[f"I{b}"].value == f"=SUM(D{a}:D{b})"
 
         for r in (9, 150, total_row - 1):
-            assert s[f"C{r}"].value == f"=$B$6 * E{r}"
+            assert s[f"C{r}"].value is None
             assert s[f"D{r}"].value == f"=$S$2 * E{r}"
-        assert s[f"C{total_row}"].value == f"=SUM(C9:C{total_row - 1})"
+        assert s[f"C{total_row}"].value is None
+        assert s[f"D{total_row}"].value == f"=SUM(D9:D{total_row - 1})"
 
 
 def test_formulas_not_values():
     """Every money cell must be a live formula -- the workbook is edited after export."""
     wb = _wb(STORES[:2])
     s = wb[tab_name(STORES[0])]
-    for cell in ("C9", "D9", "E9", "Q2", "Q3", "Q6", "H39", "I39"):
+    for cell in ("D9", "E9", "Q3", "Q6", "I39"):
         v = s[cell].value
         assert isinstance(v, str) and v.startswith("="), f"{cell} is not a formula: {v!r}"
 
@@ -303,7 +307,7 @@ def test_column_widths_set():
     """Currency at Excel's ~8.43 default renders as ####."""
     wb = _wb(STORES[:2])
     s = wb[tab_name(STORES[0])]
-    for col in ("C", "D", "E", "H", "I", "Q", "S"):
+    for col in ("D", "E", "I", "Q", "S"):
         assert (s.column_dimensions[col].width or 0) >= 12, f"column {col} too narrow"
 
 

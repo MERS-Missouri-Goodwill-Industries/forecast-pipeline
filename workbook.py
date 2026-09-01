@@ -11,6 +11,7 @@ import datetime as dt
 from io import BytesIO
 
 from openpyxl import Workbook
+from openpyxl.comments import Comment
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
@@ -139,6 +140,15 @@ def build_workbook(
     store_start = 14
     store_end = store_start + len(stores) - 1
 
+    # No baseline forecast column ships in the workbook -- this split only seeds the one
+    # COO Adjusted Planned Sales input per store, in Python, at build time. An explicit
+    # override still wins.
+    forecasted = compute_forecasted_bases(stores, recommended_plan)
+    planned_sales: dict[str, float] = {}
+    for st in stores:
+        override_base = overrides.get(st["code"], {}).get("plan_base")
+        planned_sales[st["code"]] = forecasted[st["code"]] if override_base is None else override_base
+
     wb = Workbook()
     wb.remove(wb.active)
 
@@ -149,7 +159,7 @@ def build_workbook(
     dd = wb.create_sheet("Daily_Disaggregated_Plan")
     _calendar_inputs(wb, days, weights, holidays, df_last)
     _day_factors(wb, days, df_last)
-    _plan_inputs(wb, stores, recommended_plan, overrides, store_start, store_end)
+    _plan_inputs(wb, stores, planned_sales, store_start, store_end)
 
     for idx, store in enumerate(stores):
         _store_tab(wb, store, store_start + idx, days, ranges, daily_total_row,
@@ -172,9 +182,10 @@ def _how_to_use(wb: Workbook, session_name: str, author: str) -> None:
     _hdr(s["A1"], 14).value = f"{session_name} — How to Use This Workbook"
 
     _hdr(s["A3"]).value = "Purpose"
-    s["A4"] = ("Turns each store's forecast plus your day-of-week assumptions into a day-by-day, "
-               "store-by-store sales plan. Everything below Calendar_Inputs and Plan_Inputs is a "
-               "live formula — change an input and the rest of the workbook recalculates.")
+    s["A4"] = ("Turns each store's committed Planned Sales figure plus your day-of-week "
+               "assumptions into a day-by-day, store-by-store sales plan. Everything below "
+               "Calendar_Inputs and Plan_Inputs is a live formula — change an input and the rest "
+               "of the workbook recalculates.")
     s["A4"].alignment = Alignment(wrap_text=True)
 
     _hdr(s["A6"]).value = "Colour Legend"
@@ -193,12 +204,12 @@ def _how_to_use(wb: Workbook, session_name: str, author: str) -> None:
     _hdr(s["A12"]).value = "Sheet Index"
     index = [
         ("Exec_Summary", "Top-level numbers and the monthly rollup."),
-        ("All_Stores_Summary", "One row per store: forecast, your adjustment, and the variance."),
+        ("All_Stores_Summary", "One row per store: COO Adjusted Planned Sales, code, name, region, status."),
         ("Monthly_Matrix", "Every store's 12 months in one grid, totalling to the network."),
         ("Daily_Disaggregated_Plan", "Flat store-by-day feed for Power BI."),
         ("Calendar_Inputs", "Your control centre: weekday weights, holidays, Weekday Mix."),
         ("Day_Factors", "The 365-day engine behind every daily figure."),
-        ("Plan_Inputs", "The plan total and each store's base and override."),
+        ("Plan_Inputs", "The plan total and each store's COO Adjusted Planned Sales input."),
         ("[Store] tabs", "One 365-day schedule per store. Closure dates live in columns V to X."),
     ]
     for i, (name, desc) in enumerate(index):
@@ -207,27 +218,25 @@ def _how_to_use(wb: Workbook, session_name: str, author: str) -> None:
         s[f"B{r}"] = desc
 
     _hdr(s["A23"]).value = "Reading a Store Tab"
-    s["A24"] = ("Every store tab is laid out the same way. Two money columns sit side by side: "
-                "one keeps the forecast, one is yours to change.")
+    s["A24"] = ("Every store tab is laid out the same way: one 365-day daily schedule, one money "
+                "column.")
     s["A24"].alignment = Alignment(wrap_text=True)
 
     guide = [
         ("Column E — Day % of Annual",
          "This day's slice of the whole year. The same seven values for every store, all year. "
          "A closed day reads 0%. See the Weekday Mix table on Calendar_Inputs."),
-        ("Column C — Recommended Sales",
-         "What the forecast says: Forecasted Plan Base (B6) x Day % of Annual. Leave it alone — "
-         "it is your before picture."),
         ("Column D — COO Adjusted Plan",
-         "What you are committing to. Starts out matching column C. This is the only money "
-         "column you change. Clear a cell to take that day out of the plan."),
-        ("Column H — Recommended Month Total", "That month's Recommended days added up."),
-        ("Column I — COO Month Total", "The same month from your column, so you can compare."),
-        ("Row 2 vs Row 3",
-         "Row 2 is Recommended by month. Row 3 is your version and it adds up the daily column, "
-         "so clearing days moves it straight away."),
+         "What you are committing to for that day: the store's annual Planned Sales (S2) x "
+         "Day % of Annual. This is the only money column on the sheet. Clear a cell to take "
+         "that day out of the plan."),
+        ("Column I — COO Month Total", "That month's COO Adjusted Plan days added up."),
+        ("Row 3",
+         "Your committed plan by month. It adds up the daily column, so clearing days moves it "
+         "straight away."),
         ("Cell Q6 — Diff",
-         "Your year (Q3) minus the forecast year (Q2). Zero until you change something."),
+         "The 365 daily amounts (Q3) minus the annual input (S2). Always $0.00 -- if it isn't, "
+         "a formula has been broken."),
     ]
     for i, (label, desc) in enumerate(guide):
         r = 25 + i
@@ -238,9 +247,9 @@ def _how_to_use(wb: Workbook, session_name: str, author: str) -> None:
     _hdr(s["A34"]).value = "Taking days or months out"
     s["A35"] = ("Select any run of cells in the COO Adjusted Plan column and press Delete — a few "
                 "days, half a month, or a whole month. The COO Month Total, that month in row 3, "
-                "the year in Q3 and the Diff in Q6 all follow on their own. Recommended stays put "
-                "so you keep the comparison. For a planned renovation, enter the date range in "
-                "columns V to X instead and the days zero out on both tracks.")
+                "the year in Q3, and the Diff in Q6 all follow on their own. For a planned "
+                "renovation, enter the date range in columns V to X instead and the days zero "
+                "out automatically.")
     s["A35"].alignment = Alignment(wrap_text=True)
 
     _hdr(s["A38"]).value = "Contacts"
@@ -390,27 +399,27 @@ def _day_factors(wb: Workbook, days: list[dict], df_last: int) -> None:
 
 
 # --- Plan_Inputs -----------------------------------------------------------------------
-def _plan_inputs(wb: Workbook, stores: list[dict], recommended_plan: float,
-                 overrides: dict, start: int, end: int) -> None:
+def _plan_inputs(wb: Workbook, stores: list[dict], planned_sales: dict[str, float],
+                 start: int, end: int) -> None:
     s = wb.create_sheet("Plan_Inputs")
     s.column_dimensions["A"].width = 26
     s.column_dimensions["B"].width = 34
-    for c in range(3, 11):
-        s.column_dimensions[get_column_letter(c)].width = 20
+    for c in range(3, 6):
+        s.column_dimensions[get_column_letter(c)].width = 22
 
-    _hdr(s["A1"], 14).value = "Plan Inputs — Store Baselines"
-    _hdr(s["A4"]).value = "Recommended Plan"
-    _inp(s["B4"], MONEY).value = recommended_plan
-    _note(s["C4"]).value = "The network plan. Replace with the model number once Run Forecast is live."
-    _hdr(s["A5"]).value = "COO Adjusted Plan"
-    _fml(s["B5"], MONEY).value = f"=SUM($H${start}:$H${end})"
-    _hdr(s["A6"]).value = "Variance"
-    _fml(s["B6"], MONEY).value = "=B5-B4"
+    _hdr(s["A1"], 14).value = "Plan Inputs — Store Planned Sales"
+    _hdr(s["A5"]).value = "Total Planned Sales"
+    _fml(s["B5"], MONEY).value = f"=SUM($E${start}:$E${end})"
 
-    for i, h in enumerate(["Code", "Name", "Region", "Status", "Base Sales",
-                           "Forecasted Plan Base", "COO Adjusted Plan Base",
-                           "Effective Plan Base", "Variance", "Basis Note"]):
+    for i, h in enumerate(["Code", "Name", "Region", "Status", "COO Adjusted Planned Sales"]):
         _hdr(s.cell(13, i + 1)).value = h
+    s["E13"].comment = Comment(
+        "Editable input. Seeded from a base-sales-weighted split of the network plan "
+        "(new stores inherit the average of up to three same-region comparables; closed "
+        "stores start at $0) -- change any value here to commit a different plan for that "
+        "store.",
+        "workbook.py",
+    )
 
     for i, st in enumerate(stores):
         r = start + i
@@ -418,19 +427,11 @@ def _plan_inputs(wb: Workbook, stores: list[dict], recommended_plan: float,
         _fml(s[f"B{r}"]).value = st["name"]
         _fml(s[f"C{r}"]).value = st["region"]
         _inp(s[f"D{r}"]).value = st["status"]
-        _inp(s[f"E{r}"], MONEY).value = float(st["base_sales"])
-        # Share of the plan, computed inline -- no named reallocation factor anywhere.
-        _fml(s[f"F{r}"], MONEY).value = f"=E{r}/SUM($E${start}:$E${end})*$B$4"
-        ov = overrides.get(st["code"], {}).get("plan_base")
-        _inp(s[f"G{r}"], MONEY).value = ov if ov is not None else None
-        _fml(s[f"H{r}"], MONEY).value = f'=IF(G{r}="",F{r},G{r})'
-        _fml(s[f"I{r}"], MONEY).value = f"=H{r}-F{r}"
-        _note(s[f"J{r}"]).value = "Base sales, taken as this store's share of the plan."
+        _inp(s[f"E{r}"], MONEY).value = round(planned_sales[st["code"]], 2)
 
     tr = end + 1
     _hdr(s[f"A{tr}"]).value = "TOTAL"
-    for col in ("E", "F", "H", "I"):
-        _fml(s[f"{col}{tr}"], MONEY).value = f"=SUM({col}{start}:{col}{end})"
+    _fml(s[f"E{tr}"], MONEY).value = f"=SUM(E{start}:E{end})"
 
 
 # --- store tab -------------------------------------------------------------------------
@@ -451,7 +452,6 @@ def _store_tab(wb: Workbook, store: dict, plan_row: int, days: list[dict],
         _hdr(s[f"{month_cols[m]}1"]).value = name[:3]
     _hdr(s["Q1"]).value = "Total"
     _hdr(s["S1"]).value = "COO Adjusted Planned Sales"
-    _hdr(s["T1"]).value = "Variance"
     _hdr(s["V1"]).value = "Closure Start"
     _hdr(s["W1"]).value = "Closure End"
     _hdr(s["X1"]).value = "Closure Label"
@@ -459,7 +459,6 @@ def _store_tab(wb: Workbook, store: dict, plan_row: int, days: list[dict],
     _fml(s["A2"]).value = store["code"]
     _fml(s["B2"]).value = store["name"]
     _fml(s["C2"]).value = "N/A"
-    _hdr(s["D2"]).value = "Recommended"
     _hdr(s["D3"]).value = "COO Adjusted Plan"
 
     for i in range(max(1, len(closures))):
@@ -475,26 +474,24 @@ def _store_tab(wb: Workbook, store: dict, plan_row: int, days: list[dict],
 
     for m in range(12):
         a, b = ranges[m]
-        _xs(s[f"{month_cols[m]}2"], MONEY).value = f"=$B$6 * SUM(E{a}:E{b})"
         # Row 3 ADDS UP the daily COO column. This is what lets whole months or a handful
         # of days be cleared in the daily block and have the month, year and Diff follow.
         _xs(s[f"{month_cols[m]}3"], MONEY).value = f"=SUM(D{a}:D{b})"
 
-    _fml(s["Q2"], MONEY).value = "=SUM(E2:P2)"
     _fml(s["Q3"], MONEY).value = f"=D{daily_total_row}"
-    _xs(s["S2"], MONEY).value = f'={sheet_ref("Plan_Inputs", f"$H${plan_row}")}'
-    _xs(s["T2"], MONEY).value = f'={sheet_ref("Plan_Inputs", f"$I${plan_row}")}'
+    _xs(s["S2"], MONEY).value = f'={sheet_ref("Plan_Inputs", f"$E${plan_row}")}'
     _hdr(s["Q5"]).value = "Diff"
-    _fml(s["Q6"], MONEY2).value = "=Q3-Q2"
+    # Daily disaggregation (Q3) minus the annual input (S2) -- zero by construction. Anything
+    # else means a formula somewhere has been broken.
+    _fml(s["Q6"], MONEY2).value = "=Q3-$S$2"
 
-    _hdr(s["A6"]).value = "Forecasted Plan Base"
-    _xs(s["B6"], MONEY).value = f'={sheet_ref("Plan_Inputs", f"$F${plan_row}")}'
     _hdr(s["A7"]).value = "Daily Schedule"
 
-    for i, h in enumerate(["Date", "Day of Week", "Recommended Sales", "COO Adjusted Plan",
-                           "Day % of Annual", "Holiday", "Month",
-                           "Recommended Month Total", "COO Month Total"]):
-        _hdr(s.cell(8, i + 1)).value = h
+    headers = {"A": "Date", "B": "Day of Week", "D": "COO Adjusted Plan",
+               "E": "Day % of Annual", "F": "Holiday", "G": "Month",
+               "I": "COO Month Total"}
+    for col, h in headers.items():
+        _hdr(s[f"{col}8"]).value = h
 
     month_start = FIRST_DAILY_ROW
     for i, day in enumerate(days):
@@ -503,7 +500,6 @@ def _store_tab(wb: Workbook, store: dict, plan_row: int, days: list[dict],
         _xs(s[f"A{r}"]).value = f'={sheet_ref("Day_Factors", f"A{dfr}")}'
         s[f"A{r}"].number_format = "yyyy-mm-dd"
         _xs(s[f"B{r}"]).value = f'={sheet_ref("Day_Factors", f"C{dfr}")}'
-        _fml(s[f"C{r}"], MONEY2).value = f"=$B$6 * E{r}"
         _inp(s[f"D{r}"], MONEY2).value = f"=$S$2 * E{r}"
 
         if has_closures:
@@ -525,16 +521,15 @@ def _store_tab(wb: Workbook, store: dict, plan_row: int, days: list[dict],
 
         last_of_month = (i == len(days) - 1) or (days[i + 1]["month"] != day["month"])
         if last_of_month:
-            _fml(s[f"H{r}"], MONEY).value = f"=SUM(C{month_start}:C{r})"
             _fml(s[f"I{r}"], MONEY).value = f"=SUM(D{month_start}:D{r})"
             month_start = r + 1
 
         if day["holiday_label"] or day["date"] in closed_dates:
-            for c in "ABCDEF":
+            for c in "ABDEF":
                 s[f"{c}{r}"].fill = HOLIDAY_FILL
 
     _hdr(s[f"A{daily_total_row}"]).value = "FULL YEAR"
-    for col, fmt in [("C", MONEY), ("D", MONEY), ("E", PCT4)]:
+    for col, fmt in [("D", MONEY), ("E", PCT4)]:
         _fml(s[f"{col}{daily_total_row}"], fmt).value = (
             f"=SUM({col}{FIRST_DAILY_ROW}:{col}{daily_total_row - 1})"
         )
@@ -556,12 +551,8 @@ def _exec_summary(wb: Workbook, s, session_name: str, stores: list[dict], year: 
 
     rows = [
         ("Plan Year", year, None, None),
-        ("Recommended Plan ($)", f'={sheet_ref("Plan_Inputs", "$B$4")}', MONEY,
-         "The network plan before any change."),
-        ("COO Adjusted Plan ($)", f'={sheet_ref("Plan_Inputs", "$B$5")}', MONEY,
-         "After store-level and single-day changes. This is the budget."),
-        ("Variance ($)", f'={sheet_ref("Plan_Inputs", "$B$6")}', MONEY,
-         "How far the adjustments moved the plan."),
+        ("COO Adjusted Planned Sales ($)", f'={sheet_ref("Plan_Inputs", "$B$5")}', MONEY,
+         "The committed network plan -- the sum of every store's Planned Sales on Plan_Inputs."),
         ("Forecast Implied YoY Growth (%)", None, "0.00%",
          "PLACEHOLDER — fill in from the model run. Growth already inside the forecast."),
         ("Continuing Stores", sum(1 for x in stores if x["status"] == "Continuing"), None, None),
@@ -590,16 +581,14 @@ def _exec_summary(wb: Workbook, s, session_name: str, stores: list[dict], year: 
 
 
 def _all_stores_summary(wb: Workbook, s, stores: list[dict], start: int) -> None:
-    headers = ["Store Code", "Store Name", "Region", "Status", "Base Sales ($)",
-               "Forecasted Plan Base ($)", "COO Adjusted Plan Base ($)", "Variance ($)"]
+    headers = ["Store Code", "Store Name", "Region", "Status", "COO Adjusted Planned Sales ($)"]
     for i, h in enumerate(headers):
         _hdr(s.cell(1, i + 1)).value = h
     s.column_dimensions["A"].width = 12
     s.column_dimensions["B"].width = 32
     s.column_dimensions["C"].width = 12
     s.column_dimensions["D"].width = 14
-    for c in range(5, 9):
-        s.column_dimensions[get_column_letter(c)].width = 22
+    s.column_dimensions["E"].width = 26
 
     for i, st in enumerate(stores):
         r, pr = 2 + i, start + i
@@ -607,14 +596,11 @@ def _all_stores_summary(wb: Workbook, s, stores: list[dict], start: int) -> None
         _fml(s[f"B{r}"]).value = st["name"]
         _fml(s[f"C{r}"]).value = st["region"]
         _fml(s[f"D{r}"]).value = st["status"]
-        _inp(s[f"E{r}"], MONEY).value = float(st["base_sales"])
-        for col, src in [("F", "F"), ("G", "H"), ("H", "I")]:
-            _xs(s[f"{col}{r}"], MONEY).value = f'={sheet_ref("Plan_Inputs", f"${src}${pr}")}'
+        _xs(s[f"E{r}"], MONEY).value = f'={sheet_ref("Plan_Inputs", f"$E${pr}")}'
 
     tr = 2 + len(stores)
     _hdr(s[f"A{tr}"]).value = "NETWORK TOTAL"
-    for col in ("E", "F", "G", "H"):
-        _fml(s[f"{col}{tr}"], MONEY).value = f"=SUM({col}2:{col}{tr - 1})"
+    _fml(s[f"E{tr}"], MONEY).value = f"=SUM(E2:E{tr - 1})"
     s.freeze_panes = "A2"
 
 
@@ -650,8 +636,8 @@ def _monthly_matrix(wb: Workbook, s, stores: list[dict]) -> None:
 
 def _daily_feed(wb: Workbook, s, stores: list[dict], days: list[dict]) -> None:
     headers = ["Store Code", "Store Name", "Date", "Month", "Day of Week",
-               "Day % of Annual", "Recommended Sales ($)", "COO Adjusted Plan ($)"]
-    widths = [12, 32, 14, 12, 14, 16, 20, 22]
+               "Day % of Annual", "COO Adjusted Plan ($)"]
+    widths = [12, 32, 14, 12, 14, 16, 22]
     for i, (h, w) in enumerate(zip(headers, widths)):
         _hdr(s.cell(1, i + 1)).value = h
         s.column_dimensions[get_column_letter(i + 1)].width = w
@@ -668,8 +654,7 @@ def _daily_feed(wb: Workbook, s, stores: list[dict], days: list[dict]) -> None:
             _fml(s.cell(r, 4)).value = f'=TEXT(C{r},"mmmm")'
             _xs(s.cell(r, 5)).value = f"={sheet_ref(name, f'$B${sr}')}"
             _xs(s.cell(r, 6), PCT4).value = f"={sheet_ref(name, f'$E${sr}')}"
-            _xs(s.cell(r, 7), MONEY2).value = f"={sheet_ref(name, f'$C${sr}')}"
-            _xs(s.cell(r, 8), MONEY2).value = f"={sheet_ref(name, f'$D${sr}')}"
+            _xs(s.cell(r, 7), MONEY2).value = f"={sheet_ref(name, f'$D${sr}')}"
             r += 1
     s.freeze_panes = "A2"
 
