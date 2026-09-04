@@ -417,7 +417,7 @@ def test_databricks_parsing_and_reconciliation():
     )
 
     assert io.auth_mode() in {"mock", "pat", "oauth", "oauth-u2m"}
-    assert io.FORECAST_TABLE == "gold.retail.test_agg_sales_forecast"
+    assert io.FORECAST_TABLE == "gold.retail_data_science.test_agg_sales_forecast"
 
 
 def test_oauth_u2m_is_opt_in_not_a_silent_fallback():
