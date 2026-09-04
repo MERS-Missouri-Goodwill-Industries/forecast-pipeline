@@ -15,6 +15,7 @@ Run:  python -m pytest tests/ -q      (or: python tests/test_acceptance.py)
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -415,8 +416,37 @@ def test_databricks_parsing_and_reconciliation():
         "a code mismatch must be detectable, not silent"
     )
 
-    assert io.auth_mode() in {"mock", "pat", "oauth"}
-    assert io.FORECAST_TABLE == "gold.retail_data_science.test_agg_sales_forecast"
+    assert io.auth_mode() in {"mock", "pat", "oauth", "oauth-u2m"}
+    assert io.FORECAST_TABLE == "gold.retail.test_agg_sales_forecast"
+
+
+def test_oauth_u2m_is_opt_in_not_a_silent_fallback():
+    """DATABRICKS_AUTH_TYPE=u2m is for workspaces where PATs are disabled: browser sign-in,
+    no secret in any file. It must never fire on its own -- a deployed app's container has
+    no browser and no human to click "Allow"."""
+    import databricks_io as io
+
+    saved = {k: os.environ.pop(k, None) for k in
+              ("DATABRICKS_HOST", "DATABRICKS_HTTP_PATH", "DATABRICKS_CLIENT_ID",
+               "DATABRICKS_CLIENT_SECRET", "DATABRICKS_TOKEN", "DATABRICKS_AUTH_TYPE")}
+    try:
+        os.environ["DATABRICKS_HOST"] = "example.azuredatabricks.net"
+        os.environ["DATABRICKS_HTTP_PATH"] = "/sql/1.0/warehouses/x"
+
+        assert io.auth_mode() == "mock", "no auth configured must stay mock, not u2m"
+
+        os.environ["DATABRICKS_AUTH_TYPE"] = "u2m"
+        assert io.auth_mode() == "oauth-u2m"
+
+        os.environ["DATABRICKS_CLIENT_ID"] = "id"
+        os.environ["DATABRICKS_CLIENT_SECRET"] = "secret"
+        assert io.auth_mode() == "oauth", "M2M must take priority over U2M when both are set"
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
 
 if __name__ == "__main__":

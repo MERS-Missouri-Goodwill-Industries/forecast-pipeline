@@ -116,14 +116,36 @@ npm install
 npm run build && npm start          # http://localhost:8000
 npm run dev                         # Vite dev server on :3000
 
-# Python
-cd apps/sales-planning-python
+# Python -- lives at the repo root, not under apps/
 pip install -r requirements.txt
 streamlit run app.py
 ```
 
-Both run in **mock mode** without credentials. For live data create `.env` from
-`.env.example` (never commit it — `.gitignore` covers it).
+Both run in **mock mode** without credentials.
+
+**If personal access tokens are disabled for this workspace** (org policy — not every
+workspace allows PATs), use OAuth U2M instead: a one-time browser sign-in with your own
+Databricks identity, no secret in any file.
+
+```
+DATABRICKS_HOST=adb-201205741376717.17.azuredatabricks.net
+DATABRICKS_HTTP_PATH=/sql/1.0/warehouses/3d33bbee9a23df31
+DATABRICKS_AUTH_TYPE=u2m
+```
+
+The first query opens a browser tab to approve; the SQL connector caches the result for
+reuse. This is opt-in only (`databricks_io.auth_mode()` never falls back to it on its own)
+because a *deployed* app's container has no browser and no human to click Allow.
+
+If PATs are allowed for you, the simpler option — for the Python app, set `.env` directly
+(nothing loads it automatically; `export $(grep -v '^#' .env | xargs)` before running); for
+the Node app, create `.env` from `.env.example` (never commit it — `.gitignore` covers it):
+
+```
+DATABRICKS_HOST=adb-201205741376717.17.azuredatabricks.net
+DATABRICKS_HTTP_PATH=/sql/1.0/warehouses/3d33bbee9a23df31
+DATABRICKS_TOKEN=<personal access token>
+```
 
 ---
 

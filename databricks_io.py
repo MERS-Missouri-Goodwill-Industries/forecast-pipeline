@@ -3,8 +3,15 @@
 Auth resolves in this order:
   1. OAuth M2M   -- DATABRICKS_CLIENT_ID / DATABRICKS_CLIENT_SECRET, injected by the
                     platform once a SQL warehouse is bound as an App Resource. Production.
-  2. PAT         -- DATABRICKS_TOKEN from a local .env. Development only.
-  3. Mock        -- neither configured; returns empty results so the app still runs.
+  2. PAT         -- DATABRICKS_TOKEN from a local .env. Local dev, only if PATs are allowed
+                    for this workspace/user.
+  3. OAuth U2M   -- DATABRICKS_AUTH_TYPE=u2m, no secret of any kind. Opens a browser for you
+                    to sign in with your own Databricks identity; the SQL connector caches
+                    the resulting token locally. Local dev only -- a deployed app's container
+                    has no browser and no human to click "Allow", so this must never be the
+                    fallback when nothing is configured. This is the option when PATs are
+                    disabled org-wide.
+  4. Mock        -- nothing configured; returns empty results so the app still runs.
 """
 
 from __future__ import annotations
@@ -15,7 +22,7 @@ import re
 from datetime import datetime, timezone
 
 SCHEMA = "gold.retail_data_science"
-FORECAST_TABLE = f"{SCHEMA}.test_agg_sales_forecast"
+FORECAST_TABLE = "gold.retail.test_agg_sales_forecast"
 SCENARIOS_TABLE = f"{SCHEMA}.published_planning_scenarios"
 
 
@@ -39,6 +46,10 @@ def auth_mode() -> str:
         return "oauth"
     if os.environ.get("DATABRICKS_TOKEN"):
         return "pat"
+    # Opt-in only -- this must never be a silent fallback. A deployed app's container has
+    # no browser and no human to complete the sign-in, so it would just hang.
+    if os.environ.get("DATABRICKS_AUTH_TYPE", "").strip().lower() in ("u2m", "oauth-u2m", "browser"):
+        return "oauth-u2m"
     return "mock"
 
 
@@ -56,6 +67,15 @@ def _connect():
             http_path=_http_path(),
             credentials_provider=_oauth_provider,
         )
+    if mode == "oauth-u2m":
+        # Browser-based sign-in with your own identity -- no token of any kind stored in
+        # this repo or in .env. The connector opens a tab, you approve, it caches the
+        # result (keyed to host + http_path) for reuse on the next run.
+        return sql.connect(
+            server_hostname=_host(),
+            http_path=_http_path(),
+            auth_type="databricks-oauth",
+        )
     return sql.connect(
         server_hostname=_host(),
         http_path=_http_path(),
@@ -66,12 +86,11 @@ def _connect():
 def _oauth_provider():
     from databricks.sdk.core import Config
 
-    cfg = Config(
-        host=f"https://{_host()}",
-        client_id=os.environ["DATABRICKS_CLIENT_ID"],
-        client_secret=os.environ["DATABRICKS_CLIENT_SECRET"],
-    )
-    return cfg.authenticate
+    # Bare Config() auto-detects DATABRICKS_HOST / DATABRICKS_CLIENT_ID /
+    # DATABRICKS_CLIENT_SECRET from the environment -- exactly the names the platform
+    # injects once a SQL warehouse is bound as an App Resource. auth_mode() already
+    # confirmed both client vars are present before this is called.
+    return Config().authenticate
 
 
 def execute(statement: str) -> dict:
