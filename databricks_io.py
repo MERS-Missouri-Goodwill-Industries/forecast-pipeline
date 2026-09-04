@@ -9,8 +9,8 @@ Auth resolves in this order:
                     to sign in with your own Databricks identity; the SQL connector caches
                     the resulting token locally. Local dev only -- a deployed app's container
                     has no browser and no human to click "Allow", so this must never be the
-                    fallback when nothing is configured. This is the option when PATs are
-                    disabled org-wide.
+                    fallback when nothing is configured. Requires PATs to be usable is NOT
+                    required -- this is the option when PATs are disabled org-wide.
   4. Mock        -- nothing configured; returns empty results so the app still runs.
 """
 
