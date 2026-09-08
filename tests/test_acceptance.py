@@ -29,6 +29,7 @@ from forecast_engine import (  # noqa: E402
 )
 from workbook import (  # noqa: E402
     build_workbook, tab_name, validate_plan, EXEC_CAL_SHEET_NAME, CAL_OFFSET,
+    mm_coo_first_row, mm_coo_network_row, mm_rec_first_row, mm_rec_network_row,
 )
 
 YEAR = 2027
@@ -302,38 +303,42 @@ def test_store_tab_layout():
 
     for i, st in enumerate(stores):
         s = wb[tab_name(st)]
-        # Columns C (old baseline "Recommended Sales"), F (old "Holiday"), and H (old
-        # "Recommended Month Total") no longer carry a header or any data -- COO Adjusted
-        # Plan is the only money column on the sheet.
-        assert [s.cell(8, c).value for c in range(1, 10)] == [
-            "Date", "Day of Week", None, "COO Adjusted Plan",
+        # Two money columns side by side: C is the Recommended baseline, D is the COO's.
+        assert [s.cell(8, c).value for c in range(1, 11)] == [
+            "Date", "Day of Week", "Recommended Sales", "COO Adjusted Plan",
             "Day % of Annual", None, "Month",
-            None, "COO Month Total"]
-        assert s["C1"].value is None and s["C2"].value is None, "no POS column"
-        assert s["D2"].value is None, "no baseline 'Recommended' row"
+            "Recommended Month Total", "COO Month Total", "Month Variance ($)"]
+        assert s["D2"].value == "Recommended"
         assert s["D3"].value == "COO Adjusted Plan"
-        assert s["Q2"].value is None, "no baseline annual total"
+        assert s["D4"].value == "Variance ($)"
+        assert s["Q2"].value == f"=C{total_row}"
         assert s["Q3"].value == f"=D{total_row}"
-        assert s["Q5"].value is None, "no Diff label"
-        assert s["Q6"].value == "=Q3-$S$2"
-        assert s["S1"].value == "COO Adjusted Planned Sales"
+        assert s["Q4"].value == "=Q3-Q2"
+        assert s["Q6"].value == "=Q3-$T$2"
+        assert s["S1"].value == "Recommended Planned Sales"
+        assert s["T1"].value == "COO Adjusted Planned Sales"
+        assert s["U1"].value == "Variance ($)"
+        assert s["U2"].value == "=T2-S2"
         assert s["V1"].value == "Closure Start"
-        assert f"$E${8 + i}" in s["S2"].value
-        assert s["A6"].value is None and s["B6"].value is None, "no Forecasted Plan Base"
+        # Plan_Inputs stores start at row 14: E is Recommended, F is COO Adjusted.
+        assert s["S2"].value == f"='Plan_Inputs'!$E${14 + i}", s["S2"].value
+        assert s["T2"].value == f"='Plan_Inputs'!$F${14 + i}", s["T2"].value
 
         for m, (a, b) in enumerate(ranges):
             col = "EFGHIJKLMNOP"[m]
-            assert s[f"{col}2"].value is None, "no baseline monthly row"
+            assert s[f"{col}2"].value == f"=SUM(C{a}:C{b})", "row 2 must SUM the daily Recommended column"
             # The formula the whole delete-days workflow depends on:
             assert s[f"{col}3"].value == f"=SUM(D{a}:D{b})", "row 3 must SUM the daily COO column"
-            assert s[f"H{b}"].value is None
+            assert s[f"{col}4"].value == f"={col}3-{col}2"
+            assert s[f"H{b}"].value == f"=SUM(C{a}:C{b})"
             assert s[f"I{b}"].value == f"=SUM(D{a}:D{b})"
+            assert s[f"J{b}"].value == f"=I{b}-H{b}"
 
         for r in (9, 150, total_row - 1):
-            assert s[f"C{r}"].value is None
+            assert s[f"C{r}"].value == f"=$S$2 * E{r}"
+            assert s[f"D{r}"].value == f"=$T$2 * E{r}"
             assert s[f"F{r}"].value is None, "no Holiday column without closures"
-            assert s[f"D{r}"].value == f"=$S$2 * E{r}"
-        assert s[f"C{total_row}"].value is None
+        assert s[f"C{total_row}"].value == f"=SUM(C9:C{total_row - 1})"
         assert s[f"D{total_row}"].value == f"=SUM(D9:D{total_row - 1})"
 
 
@@ -341,7 +346,7 @@ def test_formulas_not_values():
     """Every money cell must be a live formula -- the workbook is edited after export."""
     wb = _wb(STORES[:2])
     s = wb[tab_name(STORES[0])]
-    for cell in ("D9", "E9", "Q3", "Q6", "I39"):
+    for cell in ("C9", "D9", "E9", "Q2", "Q3", "Q4", "Q6", "H39", "I39", "J39"):
         v = s[cell].value
         assert isinstance(v, str) and v.startswith("="), f"{cell} is not a formula: {v!r}"
 
@@ -390,8 +395,141 @@ def test_column_widths_set():
     """Currency at Excel's ~8.43 default renders as ####."""
     wb = _wb(STORES[:2])
     s = wb[tab_name(STORES[0])]
-    for col in ("D", "E", "I", "Q", "S"):
+    for col in ("C", "D", "E", "H", "I", "J", "Q", "S", "T"):
         assert (s.column_dimensions[col].width or 0) >= 12, f"column {col} too narrow"
+
+
+# =========================================================================================
+# Recommended vs COO Adjusted, and the variance between them
+# =========================================================================================
+def test_plan_inputs_carries_both_tracks_and_an_editable_total():
+    wb = _wb(STORES[:3])
+    s = wb["Plan_Inputs"]
+    start, end = 14, 14 + 3 - 1
+
+    assert [s.cell(13, c).value for c in range(1, 9)] == [
+        "Code", "Name", "Region", "Status", "Recommended Planned Sales",
+        "COO Adjusted Planned Sales", "Variance ($)", "Variance (%)"]
+
+    assert s["B4"].value == f"=SUM($E${start}:$E${end})", "Recommended total"
+    assert s["B6"].value == f"=SUM($F${start}:$F${end})", "COO total is bottom-up from stores"
+    assert s["B7"].value == "=B6-B5", "allocation-vs-total reconciliation"
+    assert s["B9"].value == "=B6-B4", "variance vs Recommended"
+
+    # The COO's top-line number is a typed value, not a formula -- it is theirs to change.
+    assert isinstance(s["B5"].value, (int, float)), f"B5 must be editable, got {s['B5'].value!r}"
+
+    for i in range(3):
+        r = start + i
+        assert isinstance(s[f"E{r}"].value, (int, float)), "Recommended is a seeded number"
+        assert isinstance(s[f"F{r}"].value, (int, float)), "COO Adjusted is a seeded number"
+        assert s[f"G{r}"].value == f"=F{r}-E{r}"
+        assert s[f"H{r}"].value == f"=IF(E{r}=0,0,G{r}/E{r})"
+
+
+def test_recommended_column_is_untouched_by_an_override():
+    """An override moves the COO track only. If it moved Recommended too, the variance would
+    always read zero and the COO would have no before-and-after."""
+    code = STORES[0]["code"]
+    baseline = compute_forecasted_bases(STORES[:3], PLAN)[code]
+    wb = _wb(STORES[:3], overrides={code: {"plan_base": baseline * 1.10}})
+    s = wb["Plan_Inputs"]
+    assert abs(s["E14"].value - baseline) < 0.01, "override leaked into Recommended"
+    assert abs(s["F14"].value - baseline * 1.10) < 0.01, "override not applied to COO Adjusted"
+
+
+def test_exec_summary_shows_both_numbers_and_the_variance():
+    wb = _wb(STORES[:3])
+    s = wb[EXEC_CAL_SHEET_NAME]
+    assert s["A5"].value == "Recommended Planned Sales ($)"
+    assert s["B5"].value == "='Plan_Inputs'!$B$4"
+    assert s["A6"].value == "COO Adjusted Planned Sales ($)"
+    assert s["B6"].value == "='Plan_Inputs'!$B$6"
+    assert s["A7"].value == "Variance ($)" and s["B7"].value == "=B6-B5"
+    assert s["A8"].value == "Variance (%)"
+
+    # Monthly comparison table: both tracks plus the variance, per month.
+    assert [s.cell(15, c).value for c in range(1, 7)] == [
+        "Month", "% of Annual", "Recommended ($)", "COO Adjusted ($)",
+        "Variance ($)", "Variance (%)"]
+    for m in range(12):
+        r = 16 + m
+        assert s[f"E{r}"].value == f"=D{r}-C{r}", f"row {r} variance"
+    assert s["A28"].value == "TOTAL"
+
+
+def test_monthly_matrix_stacks_both_tracks_with_a_variance_row():
+    stores = STORES[:3]
+    n = len(stores)
+    wb = _wb(stores)
+    s = wb["Monthly_Matrix"]
+    coo_net, rec_first, rec_net = (mm_coo_network_row(n), mm_rec_first_row(n),
+                                   mm_rec_network_row(n))
+    assert s[f"A{coo_net}"].value == "NETWORK TOTAL"
+    assert s[f"A{rec_net}"].value == "NETWORK TOTAL"
+    first = tab_name(stores[0])
+    assert s[f"C{mm_coo_first_row()}"].value == f"='{first}'!$E$3", "COO block reads store row 3"
+    assert s[f"C{rec_first}"].value == f"='{first}'!$E$2", "Recommended block reads store row 2"
+    var_row = rec_net + 2
+    assert s[f"A{var_row}"].value == "VARIANCE"
+    assert s[f"C{var_row}"].value == f"=C{coo_net}-C{rec_net}"
+
+
+def test_all_stores_summary_shows_variance_per_store():
+    stores = STORES[:3]
+    wb = _wb(stores)
+    s = wb["All_Stores_Summary"]
+    assert [s.cell(1, c).value for c in range(1, 9)] == [
+        "Store Code", "Store Name", "Region", "Status", "Recommended ($)",
+        "COO Adjusted ($)", "Variance ($)", "Variance (%)"]
+    first = tab_name(stores[0])
+    assert s["E2"].value == f"='{first}'!$Q$2"
+    assert s["F2"].value == f"='{first}'!$Q$3"
+    assert s["G2"].value == "=F2-E2"
+
+
+def test_no_red_text_on_a_white_background():
+    """Red on white reads as an error even when the message is informational, and it is the
+    first thing to go illegible on a projector or printed page."""
+    wb = _wb(STORES[:3])
+
+    def reddish(rgb):
+        if not isinstance(rgb, str) or len(rgb) < 6:
+            return False
+        try:
+            r, g, b = (int(rgb[-6:][i:i + 2], 16) for i in (0, 2, 4))
+        except ValueError:
+            return False
+        return r > 120 and r > g + 50 and r > b + 50
+
+    offenders = []
+    for ws in wb.worksheets:
+        for row in ws.iter_rows():
+            for c in row:
+                if c.value is None:
+                    continue
+                if "[Red]" in (c.number_format or ""):
+                    offenders.append(f"{ws.title}!{c.coordinate} [Red] number format")
+                    continue
+                colour = c.font.color.rgb if (c.font and c.font.color) else None
+                if not reddish(colour):
+                    continue
+                fg = c.fill.fgColor.rgb if (c.fill and c.fill.fgColor) else None
+                if c.fill is None or c.fill.patternType is None or fg in (None, "00000000", "FFFFFFFF"):
+                    offenders.append(f"{ws.title}!{c.coordinate} red font {colour} on white")
+    assert not offenders, "red on white: " + "; ".join(offenders[:6])
+
+
+def test_how_to_use_states_what_can_and_cannot_change():
+    wb = _wb(STORES[:2])
+    s = wb["How_To_Use"]
+    text = " ".join(str(c.value) for row in s.iter_rows() for c in row if c.value)
+    assert "WHAT YOU CAN CHANGE" in text
+    assert "WHAT NOT TO CHANGE" in text
+    # The three levers the COO actually has authority over.
+    assert "1. The total" in text
+    assert "2. The day inputs" in text
+    assert "3. Any individual store" in text
 
 
 def test_databricks_parsing_and_reconciliation():
