@@ -16,6 +16,7 @@ Auth resolves in this order:
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import os
 import re
@@ -107,37 +108,117 @@ def execute(statement: str) -> dict:
     return {"columns": cols, "rows": rows, "source": "live", "run_timestamp": stamp}
 
 
+# The forward-looking rows. The other value seen in this table is "test", a backtest
+# holdout scored against known actuals -- planning off those would be planning off history.
+FORECAST_SPLIT = "forecast"
+
+# One champion model is already chosen per store upstream (verified: every unique_id has
+# exactly one model_name), so no model or segment filter is needed here. If that ever stops
+# being true, coverage_report() reports more days per store than the window can hold and
+# the horizon guard refuses the run.
+_FORECAST_QUERY = """
+SELECT unique_id      AS store_code,
+       SUM(forecast)  AS forecast_total,
+       MIN(date)      AS first_date,
+       MAX(date)      AS last_date,
+       COUNT(*)       AS n_days
+FROM {table}
+WHERE split = '{split}'
+GROUP BY unique_id
+"""
+
+
 def fetch_store_forecasts() -> dict:
-    """Read the latest per-store annual forecast."""
-    return execute(f"SELECT * FROM {FORECAST_TABLE}")
+    """Per-store forecast totals, aggregated in SQL rather than pulled row by row."""
+    return execute(_FORECAST_QUERY.format(table=FORECAST_TABLE, split=FORECAST_SPLIT))
 
 
-def parse_store_forecasts(result: dict) -> tuple[dict[str, float], str | None]:
-    """Map the query result to {store_code: annual_forecast}.
+def _as_date(value) -> dt.date | None:
+    if isinstance(value, dt.datetime):
+        return value.date()
+    if isinstance(value, dt.date):
+        return value
+    if isinstance(value, str):
+        try:
+            return dt.date.fromisoformat(value[:10])
+        except ValueError:
+            return None
+    return None
 
-    Column names are matched loosely because the schema is not yet fixed. Returns
-    (mapping, warning). A non-None warning means the caller should surface it -- a code
-    mismatch otherwise fails silently and every store quietly keeps its fallback share.
+
+def horizon_check(first: dt.date | None, last: dt.date | None,
+                  plan_year: int, *, min_days: int = 360) -> tuple[bool, str]:
+    """Does the forecast window actually cover the year being planned?
+
+    A 90-day window summed and treated as an annual figure understates the plan by roughly
+    75% -- and would do it quietly, since the number still looks like money. This is the
+    difference between a forecast the workbook can be built on and one it cannot.
+    """
+    if first is None or last is None:
+        return False, "The forecast rows carry no usable date range."
+
+    year_start, year_end = dt.date(plan_year, 1, 1), dt.date(plan_year, 12, 31)
+    covered_start, covered_end = max(first, year_start), min(last, year_end)
+    covered = (covered_end - covered_start).days + 1 if covered_start <= covered_end else 0
+    in_year = (year_end - year_start).days + 1
+
+    if covered <= 0:
+        return False, (
+            f"The forecast covers {first} to {last}, which does not overlap the {plan_year} "
+            f"plan year at all. Nothing here can be used as a {plan_year} annual figure."
+        )
+    if covered < min_days:
+        return False, (
+            f"The forecast covers {first} to {last} — {covered} of the {in_year} days in "
+            f"{plan_year}. Summing it would understate a {plan_year} annual plan by about "
+            f"{100 * (1 - covered / in_year):.0f}%. Run Forecast needs a full-year horizon."
+        )
+    return True, f"Forecast covers {first} to {last} ({covered} days of {plan_year})."
+
+
+def parse_store_forecasts(result: dict,
+                          plan_year: int | None = None) -> tuple[dict[str, float], str | None]:
+    """Map the aggregated query result to {store_code: forecast_total}.
+
+    Returns (mapping, warning). A non-None warning means nothing was applied and the caller
+    must surface it -- a silent empty result would leave every store on its fallback share
+    with no indication anything went wrong.
     """
     cols = result.get("columns") or []
+    rows = result.get("rows", [])
     if not cols:
         return {}, None
 
-    code_col = next((c for c in cols if re.search(r"code", c, re.I)), None)
-    value_col = next((c for c in cols if re.search(r"sales|forecast|planned", c, re.I)), None)
-    if not code_col or not value_col:
-        return {}, (f"Returned {len(result.get('rows', []))} row(s) but no store-code / forecast "
-                    f"column could be identified. Columns seen: {', '.join(cols)}")
+    required = {"store_code", "forecast_total"}
+    if not required.issubset(set(cols)):
+        return {}, (
+            f"Returned {len(rows)} row(s) but the expected aggregated columns "
+            f"({', '.join(sorted(required))}) are not present. Columns seen: {', '.join(cols)}. "
+            f"The upstream table schema has probably changed."
+        )
 
     out: dict[str, float] = {}
-    for row in result.get("rows", []):
-        code = row.get(code_col)
+    firsts, lasts = [], []
+    for row in rows:
+        code = row.get("store_code")
         try:
-            value = float(row.get(value_col))
+            value = float(row.get("forecast_total"))
         except (TypeError, ValueError):
             continue
         if isinstance(code, str) and code.strip():
             out[code.strip()] = value
+        f, l = _as_date(row.get("first_date")), _as_date(row.get("last_date"))
+        if f:
+            firsts.append(f)
+        if l:
+            lasts.append(l)
+
+    if plan_year is not None:
+        ok, message = horizon_check(min(firsts) if firsts else None,
+                                    max(lasts) if lasts else None, plan_year)
+        if not ok:
+            return {}, message
+
     return out, None
 
 

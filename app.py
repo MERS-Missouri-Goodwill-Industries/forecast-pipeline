@@ -80,7 +80,7 @@ with right:
     if st.button("Run Forecast", type="primary", use_container_width=True):
         try:
             result = dbx.fetch_store_forecasts()
-            parsed, warning = dbx.parse_store_forecasts(result)
+            parsed, warning = dbx.parse_store_forecasts(result, plan_year=YEAR)
             if result.get("source") == "mock":
                 ss.run_status = ("warning", "Databricks not connected — no live rows returned.")
             elif warning:

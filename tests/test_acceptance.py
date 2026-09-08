@@ -532,12 +532,22 @@ def test_how_to_use_states_what_can_and_cannot_change():
     assert "3. Any individual store" in text
 
 
+def _agg_result(rows):
+    return {"columns": ["store_code", "forecast_total", "first_date", "last_date", "n_days"],
+            "rows": rows}
+
+
+def _full_year_rows(codes, value=1000.0, year=YEAR):
+    return [{"store_code": c, "forecast_total": value,
+             "first_date": f"{year}-01-01", "last_date": f"{year}-12-31", "n_days": 365}
+            for c in codes]
+
+
 def test_databricks_parsing_and_reconciliation():
     import databricks_io as io
 
-    good = {"columns": ["store_code", "forecast_sales"],
-            "rows": [{"store_code": s["code"], "forecast_sales": 1000.0} for s in STORES]}
-    parsed, warn = io.parse_store_forecasts(good)
+    good = _agg_result(_full_year_rows([s["code"] for s in STORES]))
+    parsed, warn = io.parse_store_forecasts(good, plan_year=YEAR)
     assert warn is None and len(parsed) == 65
     rec = io.reconcile(parsed, [s["code"] for s in STORES])
     assert rec["matched"] == 65 and rec["expected"] == 65
@@ -546,13 +556,63 @@ def test_databricks_parsing_and_reconciliation():
     _, warn = io.parse_store_forecasts(bad_cols)
     assert warn, "unmatched columns must produce a warning, not silence"
 
-    wrong_codes = {"columns": ["store_code", "forecast_sales"],
-                   "rows": [{"store_code": "ZZZZ", "forecast_sales": 1.0}]}
-    parsed, _ = io.parse_store_forecasts(wrong_codes)
+    wrong_codes = _agg_result(_full_year_rows(["ZZZZ"]))
+    parsed, _ = io.parse_store_forecasts(wrong_codes, plan_year=YEAR)
     rec = io.reconcile(parsed, [s["code"] for s in STORES])
     assert rec["matched"] == 0 and rec["missing_from_databricks"], (
         "a code mismatch must be detectable, not silent"
     )
+
+
+def test_forecast_query_targets_the_forward_looking_split():
+    """'test' rows are a backtest holdout scored against known actuals. Summing those would
+    be planning off history."""
+    import databricks_io as io
+    q = io._FORECAST_QUERY.format(table=io.FORECAST_TABLE, split=io.FORECAST_SPLIT)
+    assert "split = 'forecast'" in q
+    assert "SUM(forecast)" in q and "GROUP BY unique_id" in q
+    assert "actual_sales" not in q, "must never plan off the actuals column"
+
+
+def test_short_horizon_is_refused_not_silently_summed():
+    """The live table covers 2026-08-25 to 2026-11-22. Summed and called an annual figure it
+    understates the plan by ~75%, and the number still looks like money -- so it has to fail
+    loudly rather than flow through."""
+    import databricks_io as io
+
+    ninety_day = _agg_result([
+        {"store_code": s["code"], "forecast_total": 500_000.0,
+         "first_date": "2026-08-25", "last_date": "2026-11-22", "n_days": 90}
+        for s in STORES[:5]
+    ])
+    parsed, warn = io.parse_store_forecasts(ninety_day, plan_year=2027)
+    assert parsed == {}, "nothing may be applied from a partial-year forecast"
+    assert warn and "does not overlap" in warn, warn
+
+    # Same window, planning 2026: overlaps, but only 90 of 365 days.
+    parsed, warn = io.parse_store_forecasts(ninety_day, plan_year=2026)
+    assert parsed == {} and warn and "understate" in warn, warn
+
+    # A full year passes.
+    parsed, warn = io.parse_store_forecasts(
+        _agg_result(_full_year_rows([s["code"] for s in STORES[:5]])), plan_year=YEAR)
+    assert warn is None and len(parsed) == 5
+
+    # Without a plan year the guard stays out of the way.
+    parsed, warn = io.parse_store_forecasts(ninety_day)
+    assert warn is None and len(parsed) == 5
+
+
+def test_horizon_check_boundaries():
+    import databricks_io as io
+    import datetime as _dt
+    ok, _ = io.horizon_check(_dt.date(2027, 1, 1), _dt.date(2027, 12, 31), 2027)
+    assert ok
+    ok, msg = io.horizon_check(None, None, 2027)
+    assert not ok and "no usable date range" in msg
+    # A year's worth of days, but shifted so only part lands inside the plan year.
+    ok, _ = io.horizon_check(_dt.date(2026, 7, 1), _dt.date(2027, 6, 30), 2027)
+    assert not ok, "only half the window falls inside the plan year"
 
     assert io.auth_mode() in {"mock", "pat", "oauth", "oauth-u2m"}
     assert io.FORECAST_TABLE == "gold.retail_data_science.test_agg_sales_forecast"
