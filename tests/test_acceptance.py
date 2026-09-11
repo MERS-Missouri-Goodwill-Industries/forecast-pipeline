@@ -428,6 +428,72 @@ def test_plan_inputs_carries_both_tracks_and_an_editable_total():
         assert s[f"H{r}"].value == f"=IF(E{r}=0,0,G{r}/E{r})"
 
 
+def _model_day_pct(days, skew=0.0, scale=1.0):
+    raw = {d["date"]: (1.0 + skew * (i % 7)) * scale for i, d in enumerate(days)}
+    return raw
+
+
+def test_model_day_mix_is_opt_in_and_per_store():
+    """Opt-in by design: the weekday curve is the COO's lever and stays the default. A store
+    with no model data keeps the flat curve, so Criterion 7 still holds for it."""
+    stores = STORES[:3]
+    days = _days()
+    supplied = {stores[0]["code"]: _model_day_pct(days),
+                stores[1]["code"]: _model_day_pct(days, skew=0.3)}
+
+    wb = build_workbook(year=YEAR, stores=stores, weights=WEIGHTS, holidays=HOLIDAYS,
+                        recommended_plan=PLAN, day_pct_by_store=supplied)
+
+    for st in stores[:2]:
+        s = wb[tab_name(st)]
+        assert s["AE8"].value == "Model Day % of Year"
+        assert s["E9"].value == "=AE9", "day share must come from this store's own column"
+
+    # The store without model data is untouched.
+    s3 = wb[tab_name(stores[2])]
+    assert s3["AE9"].value is None
+    assert str(s3["E9"].value).startswith("='Day_Factors'"), s3["E9"].value
+
+    # And with nothing supplied at all, every store is on the shared curve.
+    plain = build_workbook(year=YEAR, stores=stores, weights=WEIGHTS, holidays=HOLIDAYS,
+                           recommended_plan=PLAN)
+    for st in stores:
+        assert plain[tab_name(st)]["AE9"].value is None
+
+
+def test_model_day_shares_total_exactly_one():
+    """Every daily figure is priced off this column. Rounding 365 values independently left
+    it summing to 1.00000145, which would push Q6 -- the cell that proves a store's days add
+    up to its annual input -- off zero for no visible reason."""
+    stores = STORES[:1]
+    days = _days()
+    code = stores[0]["code"]
+
+    for scale in (1.0, 3.7, 0.02):          # unnormalized input must be normalized, not trusted
+        wb = build_workbook(year=YEAR, stores=stores, weights=WEIGHTS, holidays=HOLIDAYS,
+                            recommended_plan=PLAN,
+                            day_pct_by_store={code: _model_day_pct(days, 0.2, scale)})
+        s = wb[tab_name(stores[0])]
+        total = sum(s[f"AE{9 + i}"].value for i in range(len(days)))
+        assert abs(total - 1.0) < 1e-12, f"scale {scale}: AE sums to {total!r}"
+
+
+def test_model_day_mix_still_honours_closures():
+    stores = STORES[:1]
+    days = _days()
+    code = stores[0]["code"]
+    wb = build_workbook(year=YEAR, stores=stores, weights=WEIGHTS, holidays=HOLIDAYS,
+                        recommended_plan=PLAN,
+                        day_pct_by_store={code: _model_day_pct(days)},
+                        store_overrides={code: {"closures": [
+                            {"start": f"{YEAR}-06-01", "end": f"{YEAR}-06-30"}]}})
+    e9 = wb[tab_name(stores[0])]["E9"].value
+    assert 'IF(F9<>""' in e9, "closed days must read 0%"
+    assert "AE9 / SUMPRODUCT" in e9 and "$AE$" in e9, (
+        f"must renormalize over the model column, not the weekday one: {e9}"
+    )
+
+
 def test_supplied_forecasts_drive_the_recommended_column():
     """The whole point of Run Forecast. Before this wiring existed the app showed model
     numbers on screen while the workbook rebuilt the proportional split -- two different

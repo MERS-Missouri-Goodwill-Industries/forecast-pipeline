@@ -75,6 +75,7 @@ def _init():
     ss.setdefault("day_pct_status", None)
     ss.setdefault("day_pct_forecast", {})
     ss.setdefault("forecast_band", {})
+    ss.setdefault("use_model_day_mix", False)
 
 
 _init()
@@ -151,12 +152,24 @@ if ss.day_pct_status:
     level, msg = ss.day_pct_status
     getattr(st, level)(msg)
     if ss.day_pct_forecast:
-        st.info(
-            f"Model day percentages are loaded for {len(ss.day_pct_forecast)} stores but are "
-            "not driving the workbook yet. They vary by store, while every store currently "
-            "shares one flat weekday curve — switching means each store tab carries its own "
-            "day shares. Say the word and that change goes in."
+        use_model = st.toggle(
+            f"Use the model's day mix for {len(ss.day_pct_forecast)} stores",
+            value=ss.use_model_day_mix,
+            help="Off: every store shares the one weekday curve set below, and an open "
+                 "Friday in January is worth the same as one in July. On: each store tab "
+                 "carries its own day shares from the forecast, so real per-store "
+                 "seasonality comes through. The weekday weights stay your control either "
+                 "way — turning this off returns to them.",
         )
+        if use_model != ss.use_model_day_mix:
+            ss.use_model_day_mix = use_model
+            st.rerun()
+        if ss.use_model_day_mix:
+            st.caption("Store tabs carry their own day shares (column AE). The weekday "
+                       "weights below no longer drive the daily split while this is on.")
+        else:
+            st.caption("Weekday weights are driving the daily split. The model day mix is "
+                       "loaded and ready if you want it.")
 
 # --- derived ----------------------------------------------------------------------------
 holidays = default_holidays(YEAR)
@@ -190,6 +203,8 @@ with st.container(key="export_build"):
                 year=YEAR, stores=STORES, weights=ss.weights, holidays=holidays,
                 recommended_plan=ss.recommended_plan,
                 recommended_bases=dict(ss.db_forecasts) or None,
+                day_pct_by_store=(dict(ss.day_pct_forecast)
+                                  if ss.use_model_day_mix and ss.day_pct_forecast else None),
                 store_overrides={c: {"plan_base": v} for c, v in ss.overrides.items()},
             )
         file_name = f"POC_Prototype_{YEAR}_Planned_Sales_Workbook_{YEAR}.xlsx"

@@ -300,6 +300,7 @@ def build_workbook(
     holidays: list[dict],
     recommended_plan: float,
     recommended_bases: dict[str, float] | None = None,
+    day_pct_by_store: dict[str, dict[str, float]] | None = None,
     store_overrides: dict[str, dict] | None = None,
     session_name: str | None = None,
     author: str = "vyamaykin@mersgoodwill.org",
@@ -354,9 +355,14 @@ def build_workbook(
     _plan_inputs(wb, stores, forecasted, planned_sales, store_start, store_end,
                  forecast_codes={st["code"] for st in stores if st["code"] in supplied})
 
+    # Per-store day shares are opt-in. Without them every store keeps the single flat
+    # weekday curve, which is what Criterion 7 guarantees; with them a store carries its
+    # own shape and that guarantee applies only to the stores still on the curve.
+    day_pct = day_pct_by_store or {}
     for idx, store in enumerate(stores):
         _store_tab(wb, store, store_start + idx, days, ranges, daily_total_row,
-                   df_last, overrides.get(store["code"], {}), year)
+                   df_last, overrides.get(store["code"], {}), year,
+                   model_day_pct=day_pct.get(store["code"]))
 
     _exec_calendar_inputs(wb, ecx, session_name, stores, year, weights, holidays, df_last)
     _data_validation(wb, dv, stores, validation_results)
@@ -675,7 +681,8 @@ def _plan_inputs(wb: Workbook, stores: list[dict], recommended: dict[str, float]
 # --- store tab -------------------------------------------------------------------------
 def _store_tab(wb: Workbook, store: dict, plan_row: int, days: list[dict],
                ranges: list[tuple[int, int]], daily_total_row: int, df_last: int,
-               override: dict, year: int) -> None:
+               override: dict, year: int,
+               model_day_pct: dict[str, float] | None = None) -> None:
     s = wb.create_sheet(tab_name(store))
     month_cols = ["E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P"]
 
@@ -696,6 +703,20 @@ def _store_tab(wb: Workbook, store: dict, plan_row: int, days: list[dict],
     _hdr(s["V1"]).value = "Closure Start"
     _hdr(s["W1"]).value = "Closure End"
     _hdr(s["X1"]).value = "Closure Label"
+    model_series: list[float] | None = None
+    if model_day_pct is not None:
+        _hdr(s["AE8"]).value = "Model Day % of Year"
+        s.column_dimensions["AE"].width = 20
+        # Normalize, then let the final day absorb the rounding residual. Rounding 365
+        # values independently leaves the column summing to something like 1.00000145, and
+        # every daily figure is priced off this: the store's days would no longer add up to
+        # its annual input, and Q6 -- the cell that exists to prove they do -- would drift
+        # off zero for no reason a reader could see.
+        ordered = [model_day_pct.get(d["date"], 0.0) for d in days]
+        total = sum(ordered) or 1.0
+        ordered = [v / total for v in ordered]
+        model_series = [round(v, 10) for v in ordered[:-1]]
+        model_series.append(round(1.0 - sum(model_series), 10))
 
     _fml(s["A2"]).value = store["code"]
     _fml(s["B2"]).value = store["name"]
@@ -767,6 +788,21 @@ def _store_tab(wb: Workbook, store: dict, plan_row: int, days: list[dict],
                 f'=IF({hol}<>"", {hol}, IF(SUMPRODUCT(($V$2:$V${closures_end}<=A{r})'
                 f'*($W$2:$W${closures_end}>=A{r}))>0, "Store Closure", ""))'
             )
+
+        if model_day_pct is not None:
+            # This store's own day shares, from the forecast. They live in column AE as a
+            # visible, editable input rather than being folded into the formula, so the
+            # reader can see exactly what the model said and change one day if they must.
+            _inp(s[f"AE{r}"], PCT4).value = model_series[i]
+            if has_closures:
+                _fml(s[f"E{r}"], PCT4).value = (
+                    f'=IF(F{r}<>"", 0, AE{r} / SUMPRODUCT('
+                    f'($F${FIRST_DAILY_ROW}:$F${daily_total_row - 1}="")'
+                    f'*($AE${FIRST_DAILY_ROW}:$AE${daily_total_row - 1})))'
+                )
+            else:
+                _fml(s[f"E{r}"], PCT4).value = f"=AE{r}"
+        elif has_closures:
             _fml(s[f"E{r}"], PCT4).value = (
                 f'=IF(F{r}<>"", 0, {sheet_ref("Day_Factors", f"E{dfr}")} / '
                 f'SUMPRODUCT(($F${FIRST_DAILY_ROW}:$F${daily_total_row - 1}="")'
