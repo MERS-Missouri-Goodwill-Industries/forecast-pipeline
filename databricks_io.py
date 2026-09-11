@@ -233,17 +233,46 @@ def fetch_day_pct_forecast(plan_year: int | None = None) -> dict:
         return {"status": "unusable", "message": f"'{DAY_PCT_COLUMN}' exists but returned no "
                 "usable rows.", "day_pct": {}, "stores": 0, "columns": cols}
 
-    # Percentages that do not total 1.0 per store would silently rescale every daily figure.
-    off = {c: sum(v.values()) for c, v in by_store.items()}
-    bad = {c: t for c, t in off.items() if abs(t - 1.0) > 0.01}
-    if bad:
-        sample = ", ".join(f"{c} sums to {t:.4f}" for c, t in list(bad.items())[:3])
+    # The column may arrive on a 0-1 fraction scale or a 0-100 percent scale. Decide from a
+    # single day's typical magnitude, not from the per-store sum: the sum only reaches its
+    # full value once the whole year is covered, so judging scale by the sum would call a
+    # correct-but-partial table "wrong".
+    all_days = [v for store in by_store.values() for v in store.values()]
+    typical = sorted(all_days)[len(all_days) // 2] if all_days else 0.0
+    percent_scale = typical > 0.05          # ~0.0027 as a fraction vs ~0.27 as a percent
+    divisor = 100.0 if percent_scale else 1.0
+    by_store = {c: {d: v / divisor for d, v in days.items()} for c, days in by_store.items()}
+
+    # Now every store's sum is the share of the year its rows actually cover.
+    coverage = {c: sum(v.values()) for c, v in by_store.items()}
+    lo, hi = min(coverage.values()), max(coverage.values())
+    scale_note = "0-100 percent scale" if percent_scale else "0-1 fraction scale"
+
+    if hi < 0.99:
         return {
             "status": "unusable",
-            "message": (f"{len(bad)} of {len(off)} stores have day percentages that do not "
-                        f"total 100% ({sample}). Using them would rescale every daily figure, "
-                        "so they have not been applied."),
-            "day_pct": {}, "stores": len(off), "columns": cols,
+            "message": (
+                f"The day percentages are present and look right — read on a {scale_note}, "
+                f"they are genuine day-of-year shares. They only cover "
+                f"{lo * 100:.1f}%–{hi * 100:.1f}% of the year, though "
+                f"(~{lo * 365:.0f}–{hi * 365:.0f} days of 365), because the forecast still "
+                f"runs {len(next(iter(by_store.values())))} days rather than a full year. "
+                "Applying them would leave most of the calendar with no share at all, so the "
+                "weekday weights are still driving the daily split. Extend the forecast "
+                "horizon and this will work as-is."
+            ),
+            "day_pct": {}, "stores": len(coverage), "columns": cols,
+        }
+
+    off = {c: t for c, t in coverage.items() if abs(t - 1.0) > 0.01}
+    if off:
+        sample = ", ".join(f"{c} covers {t * 100:.1f}%" for c, t in list(off.items())[:3])
+        return {
+            "status": "unusable",
+            "message": (f"{len(off)} of {len(coverage)} stores have day percentages that do "
+                        f"not total 100% of the year ({sample}). Using them would rescale "
+                        "every daily figure, so they have not been applied."),
+            "day_pct": {}, "stores": len(coverage), "columns": cols,
         }
 
     if plan_year is not None:
@@ -255,8 +284,8 @@ def fetch_day_pct_forecast(plan_year: int | None = None) -> dict:
 
     return {
         "status": "ok",
-        "message": (f"Loaded model day percentages for {len(by_store)} stores; each totals "
-                    "100% across the year."),
+        "message": (f"Loaded model day percentages for {len(by_store)} stores "
+                    f"(read on a {scale_note}); each totals 100% across the year."),
         "day_pct": by_store, "stores": len(by_store), "columns": cols,
     }
 

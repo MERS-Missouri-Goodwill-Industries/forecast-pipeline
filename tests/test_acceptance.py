@@ -14,6 +14,7 @@ Run:  python -m pytest tests/ -q      (or: python tests/test_acceptance.py)
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import os
 import re
@@ -677,25 +678,63 @@ def test_day_mix_offer_reports_a_missing_column_instead_of_erroring():
         io.execute = real_execute
 
 
-def test_day_mix_offer_refuses_percentages_that_do_not_total_100_pct():
-    """Percentages that do not sum to 1.0 per store would rescale every daily figure."""
+def _fake_day_pct(rows, n_days):
+    """Stand in for the two queries fetch_day_pct_forecast runs."""
+    import databricks_io as io
+
+    def fake(stmt):
+        if "LIMIT 1" in stmt:
+            return {"columns": ["unique_id", "date", io.DAY_PCT_COLUMN, "split"],
+                    "rows": [{}], "source": "live"}
+        return {"columns": ["store_code", "date", "day_pct", "first_date", "last_date"],
+                "rows": rows, "source": "live"}
+    return fake
+
+
+def test_day_mix_on_a_percent_scale_is_read_correctly_not_called_broken():
+    """Live data arrived on a 0-100 percent scale covering ~90 days, so per-store sums were
+    ~24.8 rather than ~1.0. Judging the scale by the sum flagged correct data as broken --
+    and would have failed a perfect full-year table too, since that sums to ~100. Scale is
+    decided from a single day's magnitude instead, and the shortfall reported as coverage."""
     import databricks_io as io
 
     real_execute = io.execute
     try:
-        def fake(stmt):
-            cols = ["unique_id", "date", io.DAY_PCT_COLUMN, "split"]
-            if "LIMIT 1" in stmt:
-                return {"columns": cols, "rows": [{}], "source": "live"}
-            return {"columns": ["store_code", "date", "day_pct", "first_date", "last_date"],
-                    "rows": [{"store_code": "ALTS", "date": f"{YEAR}-01-0{d}", "day_pct": 0.1,
-                              "first_date": f"{YEAR}-01-01", "last_date": f"{YEAR}-12-31"}
-                             for d in range(1, 6)],   # sums to 0.5, not 1.0
-                    "source": "live"}
-        io.execute = fake
-        res = io.fetch_day_pct_forecast(plan_year=YEAR)
+        # 90 days at ~0.2757 each -> 24.8, matching the real ALTS figure.
+        rows = [{"store_code": "ALTS", "date": f"2026-09-{(d % 28) + 1:02d}", "day_pct": 0.2757,
+                 "first_date": "2026-08-25", "last_date": "2026-11-22"} for d in range(90)]
+        # Dates must be distinct or they collapse into one dict key.
+        for i, r in enumerate(rows):
+            r["date"] = (dt.date(2026, 8, 25) + dt.timedelta(days=i)).isoformat()
+
+        io.execute = _fake_day_pct(rows, 90)
+        res = io.fetch_day_pct_forecast(plan_year=2027)
+
         assert res["status"] == "unusable", res
-        assert "100%" in res["message"] and res["day_pct"] == {}
+        msg = res["message"]
+        assert "look right" in msg, "correct-but-partial data must not be called broken"
+        assert "percent scale" in msg, "must say how the values were read"
+        assert "24.8" in msg or "25." in msg, f"must report actual coverage: {msg}"
+        assert "horizon" in msg, "must name the real blocker"
+        assert res["day_pct"] == {}, "still must not apply partial-year shares"
+    finally:
+        io.execute = real_execute
+
+
+def test_day_mix_full_year_on_a_percent_scale_is_accepted():
+    import databricks_io as io
+
+    real_execute = io.execute
+    try:
+        rows = [{"store_code": "ALTS",
+                 "date": (dt.date(YEAR, 1, 1) + dt.timedelta(days=i)).isoformat(),
+                 "day_pct": 100.0 / 365,
+                 "first_date": f"{YEAR}-01-01", "last_date": f"{YEAR}-12-31"}
+                for i in range(365)]
+        io.execute = _fake_day_pct(rows, 365)
+        res = io.fetch_day_pct_forecast(plan_year=YEAR)
+        assert res["status"] == "ok", res
+        assert abs(sum(res["day_pct"]["ALTS"].values()) - 1.0) < 1e-6, "normalized to a fraction"
     finally:
         io.execute = real_execute
 
