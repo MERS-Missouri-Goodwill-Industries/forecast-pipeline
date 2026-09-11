@@ -1,10 +1,15 @@
 name: Validate and deploy Databricks App
 
+# One app, one source directory: the Streamlit app at the repo root. A React/Express
+# prototype used to live in apps/sales-planning-node and was a selectable deploy target
+# here; it was retired because it shipped 525 npm packages -- and five open advisories,
+# two of them high on the Databricks SQL driver's transitive `thrift` -- for a UI the
+# Python app already covers. Git history has it if it is ever wanted back.
+
 on:
   push:
     branches: [main]
     paths:
-      - "apps/**"
       - "app.py"
       - "app.yaml"
       - "databricks_io.py"
@@ -16,7 +21,6 @@ on:
       - ".github/workflows/deploy-app.yml"
   pull_request:
     paths:
-      - "apps/**"
       - "app.py"
       - "app.yaml"
       - "databricks_io.py"
@@ -26,63 +30,14 @@ on:
       - "requirements.txt"
       - "tests/**"
   workflow_dispatch:
-    inputs:
-      app:
-        description: "Which app to deploy"
-        required: true
-        default: "node"
-        type: choice
-        options: [node, python]
 
 concurrency:
   group: databricks-app-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  # Both apps are validated on every push. The deploy-config checks reproduce the
-  # "No command to run and no Python file found" failure locally, so a broken app.yaml
-  # fails CI instead of the platform.
-  validate-node:
-    name: Validate Node app
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: apps/sales-planning-node
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: apps/sales-planning-node/package-lock.json
-
-      - name: Install
-        run: npm ci
-
-      - name: Build UI
-        run: npm run build
-
-      - name: Deployment config checks
-        run: npm run test:deploy
-
-      - name: Workbook acceptance criteria
-        run: |
-          npm run test:excel | tee /tmp/results.json
-          node -e "
-            const r = JSON.parse(require('fs').readFileSync('/tmp/results.json','utf8'));
-            const failed = r.filter(x => !x.passed);
-            failed.forEach(f => console.error('FAILED:', f.criterion, '-', f.detail));
-            console.log(\`\${r.length - failed.length}/\${r.length} criteria passed\`);
-            process.exit(failed.length ? 1 : 0);
-          "
-
-      - name: Upload built UI
-        uses: actions/upload-artifact@v4
-        with:
-          name: node-app-dist
-          path: apps/sales-planning-node/dist
-          retention-days: 7
-
+  # The deploy-config checks reproduce the "No command to run and no Python file found"
+  # failure locally, so a broken app.yaml fails CI instead of the platform.
   validate-python:
     name: Validate Python app
     runs-on: ubuntu-latest
@@ -102,7 +57,7 @@ jobs:
 
   deploy:
     name: Deploy to Databricks
-    needs: [validate-node, validate-python]
+    needs: [validate-python]
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     environment: databricks
@@ -114,28 +69,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Select source directory
-        id: pick
-        run: |
-          if [ "${{ inputs.app }}" = "python" ]; then
-            echo "dir=." >> "$GITHUB_OUTPUT"
-          else
-            echo "dir=apps/sales-planning-node" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Build UI (node only)
-        if: inputs.app == 'node'
-        working-directory: apps/sales-planning-node
-        run: |
-          npm ci
-          npm run build
-
       - uses: databricks/setup-cli@main
 
       - name: Sync source to workspace
         run: |
           TARGET="/Workspace/Shared/${APP_NAME}"
-          databricks sync "${{ steps.pick.outputs.dir }}" "$TARGET" --full
+          databricks sync . "$TARGET" --full
 
       - name: Create app if absent
         run: databricks apps create "$APP_NAME" || echo "app already exists"
@@ -147,5 +86,5 @@ jobs:
 
       - name: Report
         run: |
-          echo "Deployed ${{ inputs.app }} app from ${{ steps.pick.outputs.dir }}"
+          echo "Deployed the Python app from the repo root"
           echo "Bind the SQL warehouse as an App Resource in the Apps UI if not already done."

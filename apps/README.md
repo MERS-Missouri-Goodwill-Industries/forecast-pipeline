@@ -1,19 +1,16 @@
 # FY2027 Sales Planning — Databricks Apps
 
-Two implementations of the same tool. Both read per-store forecasts from Unity Catalog and
-emit the 73-sheet, fully formula-driven planning workbook the COO edits offline.
+The app is a **Streamlit app living at the repo root** — `app.py`, `workbook.py`,
+`forecast_engine.py`, `databricks_io.py`, `seed_data.json`, `app.yaml`. It reads per-store
+forecasts from Unity Catalog and emits the 73-sheet, fully formula-driven planning workbook
+the COO edits offline.
 
-| | `sales-planning-node` | `sales-planning-python` |
-|---|---|---|
-| UI | React 19 + Vite (the built dashboard) | Streamlit |
-| Server | Express | Streamlit |
-| Excel | ExcelJS | openpyxl |
-| Deploy path | ⚠️ `npm install` behaviour on Databricks Apps is **undocumented** | ✅ `requirements.txt` is installed automatically |
-| Tests | 12 workbook criteria + 9 deploy checks | 20 tests incl. deploy checks |
-
-**Deploy the Python app first.** It is the certain path, and it proves the risky unknowns —
-resource binding, OAuth, and whether the `aggregate_sales_forecast` store codes actually
-join. Once that works, deploy the Node app if you want the richer React UI.
+> **Retired:** a React 19 + Vite + Express implementation of the same tool used to live in
+> `apps/sales-planning-node`, and was a selectable deploy target in the workflow. It was
+> removed in September 2026: it carried 525 npm packages and five open advisories — two of
+> them high, on `thrift` beneath the Databricks SQL driver — for a UI the Python app already
+> covers, and `npm install` behaviour on Databricks Apps was never documented. It is in git
+> history if it is ever wanted back.
 
 ---
 
@@ -24,7 +21,7 @@ No command to run and no Python file found. Please add a 'command' field to your
 app.yml file.
 ```
 
-Causes, all asserted by the deploy-config tests in both apps:
+Causes, all asserted by `tests/test_acceptance.py::test_deploy_config`:
 
 | Cause | Fix |
 |---|---|
@@ -37,11 +34,10 @@ Causes, all asserted by the deploy-config tests in both apps:
 Run before every deploy:
 
 ```bash
-cd apps/sales-planning-node    && npm run test:deploy
-cd apps/sales-planning-python  && python tests/test_acceptance.py
+python tests/test_acceptance.py
 ```
 
-CI runs both on every push to `apps/**`.
+CI runs it on every push that touches the app.
 
 ---
 
@@ -49,7 +45,7 @@ CI runs both on every push to `apps/**`.
 
 Set repo secrets: `DATABRICKS_HOST`, `DATABRICKS_CLIENT_ID`, `DATABRICKS_CLIENT_SECRET`
 (a service principal with `CAN_MANAGE` on apps). Then **Actions → Validate and deploy
-Databricks App → Run workflow** and pick `node` or `python`.
+Databricks App → Run workflow**.
 
 Manually:
 
@@ -57,16 +53,11 @@ Manually:
 databricks auth login --host https://adb-201205741376717.17.azuredatabricks.net
 
 APP=fy2027-sales-planning
-SRC=apps/sales-planning-python          # or apps/sales-planning-node
 
 databricks apps create "$APP"
-databricks sync "$SRC" "/Workspace/Shared/$APP" --full
+databricks sync . "/Workspace/Shared/$APP" --full
 databricks apps deploy "$APP" --source-code-path "/Workspace/Shared/$APP"
 ```
-
-For the Node app, run `npm run build` first — `dist/` must exist. It is committed (the
-repo's global `dist/` ignore is negated for this one path) so the platform never needs a
-build step.
 
 ### After the first deploy — required
 
@@ -74,8 +65,8 @@ build step.
    grant the app's service principal `CAN_USE`.
 2. Grant that principal `SELECT` on `gold.retail_data_science`.
 
-That injects `DATABRICKS_CLIENT_ID` / `DATABRICKS_CLIENT_SECRET`. Both apps detect them
-and switch from PAT/mock to OAuth on their own — no code change, no token in the repo.
+That injects `DATABRICKS_CLIENT_ID` / `DATABRICKS_CLIENT_SECRET`. The app detects them and
+switches from mock to OAuth on its own — no code change, no token in the repo.
 
 Requires a **Premium tier** workspace.
 
@@ -83,19 +74,11 @@ Requires a **Premium tier** workspace.
 
 ## Verifying a deploy
 
-The Node app exposes `/api/health`:
+The sidebar reports the auth mode. **`mock`** means the warehouse resource is not bound.
 
-```json
-{ "status": "ok", "auth": "oauth", "uiBuilt": true, "node": "v22.x" }
-```
-
-`"auth": "mock"` means the warehouse resource is not bound. `"uiBuilt": false` means
-`dist/` did not ship.
-
-Then click **Run Forecast**. Both apps report **`Matched N of 65`** and turn the message
-red when `N < 65`, listing the unmatched codes. Watch that number — a store-code mismatch
-would otherwise fail silently, with every store quietly falling back to a proportional
-share.
+Then click **Run Forecast**. The app reports **`Matched N of 65`** and flags the message
+when `N < 65`, listing the unmatched codes. Watch that number — a store-code mismatch would
+otherwise fail silently, with every store quietly falling back to a proportional share.
 
 ---
 
@@ -110,18 +93,11 @@ handful of people, so **stop the app between planning sessions**; redeploy takes
 ## Local development
 
 ```bash
-# Node
-cd apps/sales-planning-node
-npm install
-npm run build && npm start          # http://localhost:8000
-npm run dev                         # Vite dev server on :3000
-
-# Python -- lives at the repo root, not under apps/
 pip install -r requirements.txt
 streamlit run app.py
 ```
 
-Both run in **mock mode** without credentials.
+Runs in **mock mode** without credentials.
 
 **If personal access tokens are disabled for this workspace** (org policy — not every
 workspace allows PATs), use OAuth U2M instead: a one-time browser sign-in with your own
@@ -137,9 +113,9 @@ The first query opens a browser tab to approve; the SQL connector caches the res
 reuse. This is opt-in only (`databricks_io.auth_mode()` never falls back to it on its own)
 because a *deployed* app's container has no browser and no human to click Allow.
 
-If PATs are allowed for you, the simpler option — for the Python app, set `.env` directly
-(nothing loads it automatically; `export $(grep -v '^#' .env | xargs)` before running); for
-the Node app, create `.env` from `.env.example` (never commit it — `.gitignore` covers it):
+If PATs are allowed for you, the simpler option is `.env` at the repo root — nothing loads
+it automatically, so `export $(grep -v '^#' .env | xargs)` before running. Never commit it;
+`.gitignore` covers it, and `test_deploy_config` fails if it is present at deploy time:
 
 ```
 DATABRICKS_HOST=adb-201205741376717.17.azuredatabricks.net
