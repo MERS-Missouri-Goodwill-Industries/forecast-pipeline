@@ -406,20 +406,16 @@ for h in history + [plan_row]:
     per_store = total / n if n else 0.0
     row = {"Year": h["year"], "Scope": h.get("region", "—"), "Stores": n,
            "Total Plan": f"${total:,.0f}", "Avg per Store": f"${per_store:,.0f}",
-           "YoY Total": "—", "YoY per Store": "—"}
+           "YoY Total": "—"}
     if prev:
         p_total, p_n, p_region = prev
-        p_per = p_total / p_n if p_n else 0.0
         # A growth rate across two different store sets is not a growth rate. Rather than
         # print one with a warning beneath it, don't print it: "+24.2%" would be quoted in a
         # meeting long after the caption explaining it had scrolled away.
         if h.get("region") != p_region:
-            row["YoY Total"] = row["YoY per Store"] = f"n/a vs {p_region}"
-        else:
-            if p_total:
-                row["YoY Total"] = f"{(total / p_total - 1) * 100:+.1f}%"
-            if p_per:
-                row["YoY per Store"] = f"{(per_store / p_per - 1) * 100:+.1f}%"
+            row["YoY Total"] = f"n/a vs {p_region}"
+        elif p_total:
+            row["YoY Total"] = f"{(total / p_total - 1) * 100:+.1f}%"
     rows.append(row)
     prev = (total, n, h.get("region"))
 
