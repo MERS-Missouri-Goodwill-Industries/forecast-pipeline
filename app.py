@@ -104,7 +104,7 @@ with right:
 
     if st.button("Run Forecast", type="primary", use_container_width=True):
         try:
-            result = dbx.fetch_store_forecasts()
+            result = dbx.fetch_store_forecasts(plan_year=YEAR)
             parsed, warning = dbx.parse_store_forecasts(result, plan_year=YEAR)
             if result.get("source") == "mock":
                 ss.run_status = ("warning", "Databricks not connected — no live rows returned.")
@@ -125,7 +125,7 @@ with right:
             # The prediction-interval band for the chart is independent of whether the
             # annual totals passed the horizon guard -- it is useful either way.
             try:
-                ss.forecast_band = dbx.fetch_monthly_forecast_band()
+                ss.forecast_band = dbx.fetch_monthly_forecast_band(plan_year=YEAR)
             except Exception:  # noqa: BLE001
                 ss.forecast_band = {}
         except Exception as exc:  # noqa: BLE001

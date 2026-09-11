@@ -119,6 +119,11 @@ FORECAST_SPLIT = "forecast"
 # exactly one model_name), so no model or segment filter is needed here. If that ever stops
 # being true, coverage_report() reports more days per store than the window can hold and
 # the horizon guard refuses the run.
+# The year filter is not optional. Once the horizon reaches into the plan year, the forecast
+# spans two calendar years, and summing every forecast row gives roughly a third of the
+# prior year on top of a full plan year -- about 130% of an annual figure, presented as an
+# annual figure. The horizon guard would not catch it either, because the plan year really
+# is fully covered; the total is simply too big.
 _FORECAST_QUERY = """
 SELECT unique_id      AS store_code,
        SUM(forecast)  AS forecast_total,
@@ -126,14 +131,15 @@ SELECT unique_id      AS store_code,
        MAX(date)      AS last_date,
        COUNT(*)       AS n_days
 FROM {table}
-WHERE split = '{split}'
+WHERE split = '{split}' AND YEAR(date) = {year}
 GROUP BY unique_id
 """
 
 
-def fetch_store_forecasts() -> dict:
-    """Per-store forecast totals, aggregated in SQL rather than pulled row by row."""
-    return execute(_FORECAST_QUERY.format(table=FORECAST_TABLE, split=FORECAST_SPLIT))
+def fetch_store_forecasts(plan_year: int) -> dict:
+    """Per-store forecast totals for one plan year, aggregated in SQL."""
+    return execute(_FORECAST_QUERY.format(table=FORECAST_TABLE, split=FORECAST_SPLIT,
+                                          year=int(plan_year)))
 
 
 def _as_date(value) -> dt.date | None:
@@ -209,11 +215,15 @@ def fetch_day_pct_forecast(plan_year: int | None = None) -> dict:
             "day_pct": {}, "stores": 0, "columns": cols,
         }
 
+    # Scoped to the plan year for the same reason the totals query is: a day percentage is a
+    # share of its own year, so summing across a forecast that spans two years reads well
+    # over 100% and looks like corrupt data when it is nothing of the kind.
+    year_filter = f" AND YEAR(date) = {int(plan_year)}" if plan_year is not None else ""
     result = execute(
         f"SELECT unique_id AS store_code, date, {DAY_PCT_COLUMN} AS day_pct, "
         f"       MIN(date) OVER (PARTITION BY unique_id) AS first_date, "
         f"       MAX(date) OVER (PARTITION BY unique_id) AS last_date "
-        f"FROM {FORECAST_TABLE} WHERE split = '{FORECAST_SPLIT}'"
+        f"FROM {FORECAST_TABLE} WHERE split = '{FORECAST_SPLIT}'{year_filter}"
     )
     rows = result.get("rows", [])
     by_store: dict[str, dict[str, float]] = {}
@@ -270,11 +280,20 @@ def fetch_day_pct_forecast(plan_year: int | None = None) -> dict:
     off = {c: t for c, t in coverage.items() if abs(t - 1.0) > 0.01}
     if off:
         sample = ", ".join(f"{c} covers {t * 100:.1f}%" for c, t in list(off.items())[:3])
+        over = hi > 1.01
+        cause = (
+            " Reading over 100% usually means the rows span more than one calendar year: a "
+            "day percentage is a share of its own year, so a forecast running into the plan "
+            "year carries part of the prior one too."
+            + ("" if plan_year is None else
+               f" This query was already scoped to {plan_year}, so that is not the cause "
+               "here — the percentages themselves do not add up.")
+        ) if over else ""
         return {
             "status": "unusable",
             "message": (f"{len(off)} of {len(coverage)} stores have day percentages that do "
                         f"not total 100% of the year ({sample}). Using them would rescale "
-                        "every daily figure, so they have not been applied."),
+                        f"every daily figure, so they have not been applied.{cause}"),
             "day_pct": {}, "stores": len(coverage), "columns": cols,
         }
 
@@ -293,7 +312,7 @@ def fetch_day_pct_forecast(plan_year: int | None = None) -> dict:
     }
 
 
-def fetch_monthly_forecast_band() -> dict:
+def fetch_monthly_forecast_band(plan_year: int | None = None) -> dict:
     """Monthly network forecast with its prediction interval, for the comparison chart.
 
     Returns {"status", "message", "months": [{month, month_num, year, forecast, lower,
@@ -317,13 +336,17 @@ def fetch_monthly_forecast_band() -> dict:
                             f"in the forecast table. Columns seen: {', '.join(cols)}."),
                 "months": []}
 
+    # One year at a time. The chart's x-axis is month names, so a forecast spanning two
+    # years would put Aug 2026 and Aug 2027 on the same tick and silently draw one over the
+    # other.
+    year_filter = f" AND YEAR(date) = {int(plan_year)}" if plan_year is not None else ""
     result = execute(
         "SELECT YEAR(date) AS yr, MONTH(date) AS mo, "
         "       SUM(forecast) AS forecast, "
         "       SUM(forecast_lower) AS lower, "
         "       SUM(forecast_upper) AS upper, "
         "       COUNT(DISTINCT date) AS n_days "
-        f"FROM {FORECAST_TABLE} WHERE split = '{FORECAST_SPLIT}' "
+        f"FROM {FORECAST_TABLE} WHERE split = '{FORECAST_SPLIT}'{year_filter} "
         "GROUP BY YEAR(date), MONTH(date) ORDER BY yr, mo"
     )
 

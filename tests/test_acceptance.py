@@ -618,11 +618,43 @@ def test_databricks_parsing_and_reconciliation():
     )
 
 
+def test_every_forecast_query_is_scoped_to_one_calendar_year():
+    """Once the horizon reached into FY2027 the forecast spanned two calendar years. Summing
+    every forecast row then gave ~a third of 2026 on top of all of 2027 -- day percentages
+    read 130%, and the annual totals were overstated by the same ~30% while looking entirely
+    plausible. The horizon guard cannot catch that: 2027 really is fully covered, the number
+    is just too big. Only a year filter catches it."""
+    import databricks_io as io
+
+    q = io._FORECAST_QUERY.format(table=io.FORECAST_TABLE, split=io.FORECAST_SPLIT, year=2027)
+    assert "YEAR(date) = 2027" in q, "the totals query must be scoped to the plan year"
+
+    seen = []
+    real = io.execute
+    try:
+        def capture(stmt):
+            seen.append(stmt)
+            cols = ["unique_id", "date", io.DAY_PCT_COLUMN, "forecast_lower", "forecast_upper"]
+            return {"columns": cols, "rows": [{}], "source": "live"}
+        io.execute = capture
+        io.fetch_day_pct_forecast(plan_year=2027)
+        io.fetch_monthly_forecast_band(plan_year=2027)
+    finally:
+        io.execute = real
+
+    # The probes (SELECT * ... LIMIT 1) need no filter; the aggregating queries do.
+    aggregating = [s for s in seen if "LIMIT 1" not in s]
+    assert aggregating, "expected at least one aggregating query"
+    for stmt in aggregating:
+        assert "YEAR(date) = 2027" in stmt, f"unscoped query would mix years:\n{stmt}"
+
+
 def test_forecast_query_targets_the_forward_looking_split():
     """'test' rows are a backtest holdout scored against known actuals. Summing those would
     be planning off history."""
     import databricks_io as io
-    q = io._FORECAST_QUERY.format(table=io.FORECAST_TABLE, split=io.FORECAST_SPLIT)
+    q = io._FORECAST_QUERY.format(table=io.FORECAST_TABLE, split=io.FORECAST_SPLIT,
+                                 year=YEAR)
     assert "split = 'forecast'" in q
     assert "SUM(forecast)" in q and "GROUP BY unique_id" in q
     assert "actual_sales" not in q, "must never plan off the actuals column"
