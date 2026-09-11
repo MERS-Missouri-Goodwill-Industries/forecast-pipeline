@@ -368,15 +368,25 @@ with c2:
 # --- year over year ----------------------------------------------------------------------
 st.subheader("Year-over-Year Planned Sales")
 
+history = SEED.get("plan_history", [])
+# The 2025 and 2026 plans covered East only. Comparing them against all 65 stores measures
+# a division being added, not trading, so the comparable scope is the default rather than
+# something a reader has to know to select.
+hist_region = next((h.get("region") for h in history if h.get("region")), None)
+scope_options = ["All stores", "East only", "West only"]
+default_scope = f"{hist_region} only" if hist_region else "All stores"
+
 scope = st.radio(
-    "Compare", ["All stores", "East only", "West only"], horizontal=True,
-    help="The 2025 and 2026 plans covered 46 and 47 stores; the roster is 65. Scoping to a "
-         "region lets you compare a like-for-like set instead of reading a change in network "
-         "size as growth.",
+    "Compare", scope_options, index=scope_options.index(default_scope), horizontal=True,
+    help=(f"The {history[0]['year']}–{history[-1]['year']} plans covered {hist_region} only, "
+          f"so {hist_region} is the like-for-like basis. Widening the scope adds stores those "
+          "plans never included, which shows up as growth that nobody traded for.")
+    if hist_region else "Scope the comparison to a region for a like-for-like set.",
 )
 scoped = [s for s in STORES
           if scope == "All stores" or s["region"] == scope.replace(" only", "")]
 scoped_codes = {s["code"] for s in scoped}
+comparable = hist_region is not None and scope == f"{hist_region} only"
 
 # The plan-year figure is the Databricks forecast when it is loaded -- that is the
 # forecast-implied number Mark asked for -- and the committed plan otherwise. Which one is in
@@ -388,23 +398,30 @@ else:
     plan_year_total = sum(v for c, v in effective.items() if c in scoped_codes)
     source = "COO Adjusted plan"
 
-history = SEED.get("plan_history", [])
+plan_row = {"year": YEAR, "total_plan": plan_year_total, "stores": len(scoped),
+            "region": scope.replace(" only", "") if scope != "All stores" else "All"}
 rows, prev = [], None
-for h in history + [{"year": YEAR, "total_plan": plan_year_total, "stores": len(scoped)}]:
+for h in history + [plan_row]:
     total, n = float(h["total_plan"]), int(h["stores"])
     per_store = total / n if n else 0.0
-    row = {"Year": h["year"], "Stores": n,
+    row = {"Year": h["year"], "Scope": h.get("region", "—"), "Stores": n,
            "Total Plan": f"${total:,.0f}", "Avg per Store": f"${per_store:,.0f}",
            "YoY Total": "—", "YoY per Store": "—"}
     if prev:
-        p_total, p_n = prev
+        p_total, p_n, p_region = prev
         p_per = p_total / p_n if p_n else 0.0
-        if p_total:
-            row["YoY Total"] = f"{(total / p_total - 1) * 100:+.1f}%"
-        if p_per:
-            row["YoY per Store"] = f"{(per_store / p_per - 1) * 100:+.1f}%"
+        # A growth rate across two different store sets is not a growth rate. Rather than
+        # print one with a warning beneath it, don't print it: "+24.2%" would be quoted in a
+        # meeting long after the caption explaining it had scrolled away.
+        if h.get("region") != p_region:
+            row["YoY Total"] = row["YoY per Store"] = f"n/a vs {p_region}"
+        else:
+            if p_total:
+                row["YoY Total"] = f"{(total / p_total - 1) * 100:+.1f}%"
+            if p_per:
+                row["YoY per Store"] = f"{(per_store / p_per - 1) * 100:+.1f}%"
     rows.append(row)
-    prev = (total, n)
+    prev = (total, n, h.get("region"))
 
 st.dataframe(rows, hide_index=True, use_container_width=True)
 
@@ -412,22 +429,25 @@ st.dataframe(rows, hide_index=True, use_container_width=True)
 # is which is the difference between "we grew" and "we opened stores".
 last_hist = history[-1] if history else None
 if last_hist and plan_year_total:
-    delta_stores = len(scoped) - int(last_hist["stores"])
-    headline = plan_year_total / float(last_hist["total_plan"]) - 1
-    per_now = plan_year_total / len(scoped) if scoped else 0.0
-    per_then = float(last_hist["total_plan"]) / int(last_hist["stores"])
-    like_for_like = per_now / per_then - 1 if per_then else 0.0
-    st.caption(
-        f"FY{YEAR} figure is the **{source}** across {len(scoped)} stores. Against "
-        f"{last_hist['year']}: **{headline * 100:+.1f}%** on the total, "
-        f"**{like_for_like * 100:+.1f}%** per store."
-    )
-    if abs(delta_stores) >= 2:
+    st.caption(f"FY{YEAR} figure is the **{source}** across {len(scoped)} stores "
+               f"({plan_row['region']}).")
+    if comparable:
+        headline = plan_year_total / float(last_hist["total_plan"]) - 1
+        per_now = plan_year_total / len(scoped) if scoped else 0.0
+        per_then = float(last_hist["total_plan"]) / int(last_hist["stores"])
+        like = per_now / per_then - 1 if per_then else 0.0
+        st.caption(
+            f"Like-for-like against {last_hist['year']} ({hist_region}, "
+            f"{last_hist['stores']} stores): **{headline * 100:+.1f}%** on the total, "
+            f"**{like * 100:+.1f}%** per store."
+        )
+    else:
         st.warning(
-            f"The store count moves {delta_stores:+d} between {last_hist['year']} "
-            f"({last_hist['stores']}) and FY{YEAR} ({len(scoped)}), so the total-plan growth "
-            "above is not growth at existing stores — most of it is a larger network. "
-            "**YoY per Store** is the comparable figure, or scope this to one region."
+            f"No growth rate is shown for FY{YEAR}: the {history[0]['year']}–"
+            f"{last_hist['year']} plans covered **{hist_region} only** "
+            f"({last_hist['stores']} stores), and this view is **{plan_row['region']}** "
+            f"({len(scoped)}). Comparing them would measure a division being added rather "
+            f"than anything traded. Switch to **{hist_region} only** for the real rate."
         )
 
 # --- per-store --------------------------------------------------------------------------
