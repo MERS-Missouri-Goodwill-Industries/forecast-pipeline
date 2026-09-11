@@ -44,6 +44,19 @@ def normalize_weights(weights: dict[str, float]) -> dict[str, float]:
     return {d: weights.get(d, 0.0) / total for d in WEEKDAYS}
 
 
+def rounded_weights(weights: dict[str, float], places: int = 6) -> dict[str, float]:
+    """Normalize, then round so the seven values still total exactly 1.0.
+
+    Rounding each weekday independently leaves a residual with nowhere to go, and the
+    displayed total lands on something like 100.01%. Round six and let the seventh absorb
+    what is left, so the figures a reader adds up match the total they are shown.
+    """
+    norm = normalize_weights(weights)
+    out = [round(norm[d], places) for d in WEEKDAYS[:-1]]
+    out.append(round(1.0 - sum(out), places))
+    return dict(zip(WEEKDAYS, out))
+
+
 def is_leap(year: int) -> bool:
     return (year % 4 == 0 and year % 100 != 0) or year % 400 == 0
 

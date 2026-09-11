@@ -20,6 +20,7 @@ from forecast_engine import (
     WEEKDAYS,
     build_day_factors,
     build_store_plan,
+    rounded_weights,
     compute_forecasted_bases,
     expand_closures,
     month_row_ranges,
@@ -884,13 +885,9 @@ def _exec_calendar_inputs(wb: Workbook, s, session_name: str, stores: list[dict]
 
     _hdr(s[f"A{5 + O}"]).value = "Weekday"
     _hdr(s[f"B{5 + O}"]).value = "Normalized % of Week"
-    total = sum(weights.get(d, 0.0) for d in WEEKDAYS) or 1.0
-    normalized = [weights.get(d, 0.0) / total for d in WEEKDAYS]
-    # Round each independently and the sum can drift off 100% by a hair (e.g. 99.9999%).
-    # Round all but the last, then let the last absorb whatever residual is left, so the
-    # seven inputs always sum to exactly 1.0 -- not just approximately.
-    rounded = [round(v, 6) for v in normalized[:-1]]
-    rounded.append(round(1.0 - sum(rounded), 6))
+    # Shared with the app so the two cannot drift: round six, let the seventh absorb the
+    # residual, and the seven inputs total exactly 1.0 rather than approximately.
+    rounded = list(rounded_weights(weights).values())
     for i, d in enumerate(WEEKDAYS):
         r = 6 + i + O
         _fml(s[f"A{r}"]).value = d

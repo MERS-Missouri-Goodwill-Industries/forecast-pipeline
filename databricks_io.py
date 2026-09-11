@@ -22,6 +22,9 @@ import os
 import re
 from datetime import datetime, timezone
 
+MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+              "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
 SCHEMA = "gold.retail_data_science"
 FORECAST_TABLE = f"{SCHEMA}.test_agg_sales_forecast"
 SCENARIOS_TABLE = f"{SCHEMA}.published_planning_scenarios"
@@ -287,6 +290,74 @@ def fetch_day_pct_forecast(plan_year: int | None = None) -> dict:
         "message": (f"Loaded model day percentages for {len(by_store)} stores "
                     f"(read on a {scale_note}); each totals 100% across the year."),
         "day_pct": by_store, "stores": len(by_store), "columns": cols,
+    }
+
+
+def fetch_monthly_forecast_band() -> dict:
+    """Monthly network forecast with its prediction interval, for the comparison chart.
+
+    Returns {"status", "message", "months": [{month, month_num, year, forecast, lower,
+    upper}]}. status is "mock" | "unusable" | "ok".
+
+    Caveat carried in the message, not buried here: summing per-store, per-day 10th/90th
+    percentiles overstates the interval for a network total, because it assumes every store
+    misses in the same direction on the same day. Real errors partly cancel, so the true
+    band on the total is narrower. It is a usable picture of relative uncertainty, not a
+    calibrated confidence interval.
+    """
+    probe = execute(f"SELECT * FROM {FORECAST_TABLE} LIMIT 1")
+    cols = probe.get("columns") or []
+    if probe.get("source") == "mock":
+        return {"status": "mock", "message": "Databricks not connected.", "months": []}
+
+    needed = {"forecast_lower", "forecast_upper"}
+    if not needed.issubset(set(cols)):
+        return {"status": "unusable",
+                "message": ("No prediction-interval columns (forecast_lower / forecast_upper) "
+                            f"in the forecast table. Columns seen: {', '.join(cols)}."),
+                "months": []}
+
+    result = execute(
+        "SELECT YEAR(date) AS yr, MONTH(date) AS mo, "
+        "       SUM(forecast) AS forecast, "
+        "       SUM(forecast_lower) AS lower, "
+        "       SUM(forecast_upper) AS upper, "
+        "       COUNT(DISTINCT date) AS n_days "
+        f"FROM {FORECAST_TABLE} WHERE split = '{FORECAST_SPLIT}' "
+        "GROUP BY YEAR(date), MONTH(date) ORDER BY yr, mo"
+    )
+
+    months = []
+    for row in result.get("rows", []):
+        try:
+            months.append({
+                "year": int(row["yr"]), "month_num": int(row["mo"]),
+                "month": MONTH_ABBR[int(row["mo"]) - 1],
+                "forecast": float(row["forecast"]),
+                "lower": float(row["lower"]), "upper": float(row["upper"]),
+                "n_days": int(row["n_days"]),
+            })
+        except (TypeError, ValueError, KeyError, IndexError):
+            continue
+
+    if not months:
+        return {"status": "unusable", "message": "The forecast returned no monthly rows.",
+                "months": []}
+
+    years = sorted({m["year"] for m in months})
+    span = f"{months[0]['month']} {years[0]}–{months[-1]['month']} {years[-1]}"
+    partial = [m for m in months if m["n_days"] < 28]
+    return {
+        "status": "ok",
+        "months": months,
+        "message": (
+            f"Model forecast spread covers {span} ({len(months)} months). The band is the sum "
+            "of each store-day's forecast_lower and forecast_upper, which overstates the "
+            "interval for a network total — individual misses partly cancel in reality, so "
+            "read it as relative uncertainty, not a calibrated confidence interval."
+            + (f" {len(partial)} month(s) are partial and will read low."
+               if partial else "")
+        ),
     }
 
 

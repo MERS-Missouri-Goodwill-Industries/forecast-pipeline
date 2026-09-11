@@ -15,7 +15,8 @@ import streamlit as st
 import databricks_io as dbx
 from forecast_engine import (
     WEEKDAYS, build_day_factors, build_store_plan, compute_forecasted_bases,
-    default_holidays, load_seed, normalize_weights, weekday_counts, weekday_mix,
+    default_holidays, load_seed, normalize_weights, rounded_weights, weekday_counts,
+    weekday_mix,
 )
 from workbook import workbook_bytes
 
@@ -47,13 +48,15 @@ def _init():
     ss.setdefault("preset", "excel_plan")
     if "weights" not in ss:
         ss.weights = normalize_weights(PRESETS.get(ss.preset, PRESETS["recommended"]))
-    ss.setdefault("weights_raw", {d: round(ss.weights.get(d, 0.0) * 100, 2) / 100 for d in WEEKDAYS})
+    # 4 places of a fraction == 2 decimals of a percent, the precision shown in the inputs.
+    ss.setdefault("weights_raw", rounded_weights(ss.weights, places=4))
     ss.setdefault("recommended_plan", 150_000_000.0)
     ss.setdefault("overrides", {})
     ss.setdefault("db_forecasts", {})
     ss.setdefault("run_status", None)
     ss.setdefault("day_pct_status", None)
     ss.setdefault("day_pct_forecast", {})
+    ss.setdefault("forecast_band", {})
 
 
 _init()
@@ -101,6 +104,12 @@ with right:
                             f"Stores with no forecast: {rec['missing_from_databricks']}. "
                             "Those stores fall back to a proportional share.")
                 ss.run_status = (level, msg)
+            # The prediction-interval band for the chart is independent of whether the
+            # annual totals passed the horizon guard -- it is useful either way.
+            try:
+                ss.forecast_band = dbx.fetch_monthly_forecast_band()
+            except Exception:  # noqa: BLE001
+                ss.forecast_band = {}
         except Exception as exc:  # noqa: BLE001
             ss.run_status = ("error", f"Forecast run failed: {exc}")
 
@@ -186,16 +195,19 @@ with c1:
         ss.preset = preset
         if preset in PRESETS:
             ss.weights = normalize_weights(PRESETS[preset])
-            ss.weights_raw = {d: round(ss.weights[d] * 100, 2) / 100 for d in WEEKDAYS}
+            ss.weights_raw = rounded_weights(ss.weights, places=4)
             for d in WEEKDAYS:
-                ss[f"w_{d}"] = round(ss.weights[d] * 100, 2)
+                ss[f"w_{d}"] = round(ss.weights_raw[d] * 100, 2)
         st.rerun()
 
     new_weights = {}
     for d in WEEKDAYS:
+        # Seed from weights_raw, which already carries the residual in its last weekday.
+        # Re-deriving from ss.weights here would round each day independently again and put
+        # the drift straight back, overwriting the corrected values on the very next run.
         new_weights[d] = st.number_input(
             d, min_value=0.0, max_value=100.0,
-            value=round(ss.weights.get(d, 0.0) * 100, 2), step=0.01, format="%.2f",
+            value=round(ss.weights_raw.get(d, 0.0) * 100, 2), step=0.01, format="%.2f",
             key=f"w_{d}",
         ) / 100
     if new_weights != ss.weights_raw:
@@ -237,12 +249,12 @@ with c2:
     counts.loc["Total Days"] = counts.sum()
     styled = (
         counts.style
-        .map(lambda v: "color:#c0392b; font-weight:700" if v == 53 else "")
+        .map(lambda v: "background-color:#fde9a9; font-weight:700" if v == 53 else "")
         .set_properties(subset=[str(YEAR)], **{"background-color": "rgba(31,119,180,0.12)"})
         .format("{:.0f}")
     )
     st.dataframe(styled, use_container_width=True)
-    st.caption(f"FY{YEAR} highlighted. A weekday in red occurs 53 times that year instead of "
+    st.caption(f"FY{YEAR} highlighted. A weekday shaded amber occurs 53 times that year instead of "
                "the usual 52 — the extra selling day to weight for.")
 
     st.subheader("Planned Sales Comparison")
@@ -253,13 +265,43 @@ with c2:
         "Series": ["Recommended Plan"] * 12 + ["COO Adjusted Plan"] * 12,
         "Planned Sales": recommended_monthly + coo_monthly,
     })
-    chart = alt.Chart(chart_df).mark_line(point=True).encode(
+    lines = alt.Chart(chart_df).mark_line(point=True).encode(
         x=alt.X("Month", sort=MONTH_ABBR, title=None),
         y=alt.Y("Planned Sales", title="Planned Sales ($)"),
         color=alt.Color("Series", title=None),
         tooltip=["Month", "Series", "Planned Sales"],
     )
-    st.altair_chart(chart, use_container_width=True)
+
+    # The model's prediction interval, drawn behind the plan lines for the months it
+    # actually covers. Where the band stops is where the forecast stops -- that gap is the
+    # clearest statement of the horizon limit available.
+    band_months = ss.forecast_band.get("months") if ss.forecast_band else None
+    if band_months:
+        band_df = pd.DataFrame([
+            {"Month": m["month"], "lower": m["lower"], "upper": m["upper"],
+             "forecast": m["forecast"]}
+            for m in band_months
+        ])
+        band = alt.Chart(band_df).mark_area(opacity=0.18, color="#8c8c8c").encode(
+            x=alt.X("Month", sort=MONTH_ABBR, title=None),
+            y=alt.Y("lower", title="Planned Sales ($)"),
+            y2=alt.Y2("upper"),
+            tooltip=["Month", "forecast", "lower", "upper"],
+        )
+        mid = alt.Chart(band_df).mark_line(strokeDash=[4, 3], color="#8c8c8c").encode(
+            x=alt.X("Month", sort=MONTH_ABBR),
+            y=alt.Y("forecast"),
+        )
+        st.altair_chart(band + mid + lines, use_container_width=True)
+        covered = {m["month"] for m in band_months}
+        st.caption(
+            f"Grey band = model forecast spread (forecast_lower to forecast_upper), "
+            f"covering {len(covered)} of 12 months: {', '.join(m['month'] for m in band_months)}. "
+            f"{ss.forecast_band.get('message', '')}"
+        )
+    else:
+        st.altair_chart(lines, use_container_width=True)
+        st.caption("Run Forecast to overlay the model's forecast spread on this chart.")
 
 # --- per-store --------------------------------------------------------------------------
 st.subheader("Stores")

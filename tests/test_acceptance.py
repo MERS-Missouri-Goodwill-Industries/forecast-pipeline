@@ -739,6 +739,27 @@ def test_day_mix_full_year_on_a_percent_scale_is_accepted():
         io.execute = real_execute
 
 
+def test_displayed_weekday_weights_total_exactly_100_pct():
+    """The app showed 'Total: 100.01%' on the 2026 preset. Rounding each weekday
+    independently to 2 decimals of a percent leaves a residual with nowhere to go. The
+    workbook already absorbed it into the last weekday; the app did not, so the same
+    numbers disagreed between the screen and the file."""
+    from forecast_engine import rounded_weights
+
+    for name, raw in load_seed()["dow_presets"].items():
+        shown = rounded_weights(raw, places=4)
+        total = sum(shown.values())
+        assert abs(total - 1.0) < 1e-9, f"{name} displays {total * 100:.2f}%, not 100.00%"
+        assert len(shown) == 7
+
+    app_src = (ROOT / "app.py").read_text(encoding="utf-8")
+    # The number inputs must read weights_raw. Seeding them from ss.weights re-rounds each
+    # day independently and puts the drift straight back on the next run.
+    assert "value=round(ss.weights_raw.get(d, 0.0) * 100, 2)" in app_src, (
+        "weekday number_inputs must seed from weights_raw, not re-round ss.weights"
+    )
+
+
 def test_default_weekday_preset_is_the_2026_coo_weights():
     """The COO plans against his own 2026 curve, so the app opens on it."""
     seed = load_seed()
