@@ -42,7 +42,9 @@ st.set_page_config(page_title="Sales Planning", layout="wide")
 def _init():
     ss = st.session_state
     ss.setdefault("year", AVAILABLE_YEARS[-1])
-    ss.setdefault("preset", "recommended")
+    # The COO's own 2026 workbook weights are the default starting point -- it is the curve
+    # he already plans against, so the workbook opens on familiar ground.
+    ss.setdefault("preset", "excel_plan")
     if "weights" not in ss:
         ss.weights = normalize_weights(PRESETS.get(ss.preset, PRESETS["recommended"]))
     ss.setdefault("weights_raw", {d: round(ss.weights.get(d, 0.0) * 100, 2) / 100 for d in WEEKDAYS})
@@ -50,6 +52,8 @@ def _init():
     ss.setdefault("overrides", {})
     ss.setdefault("db_forecasts", {})
     ss.setdefault("run_status", None)
+    ss.setdefault("day_pct_status", None)
+    ss.setdefault("day_pct_forecast", {})
 
 
 _init()
@@ -100,9 +104,32 @@ with right:
         except Exception as exc:  # noqa: BLE001
             ss.run_status = ("error", f"Forecast run failed: {exc}")
 
+    if st.button("Use Forecasted Day Mix", use_container_width=True,
+                 help="Replace the weekday-weight curve with the model's own day-of-year "
+                      "percentages, if the forecast pipeline is publishing them yet."):
+        try:
+            res = dbx.fetch_day_pct_forecast(plan_year=YEAR)
+            level = {"ok": "success", "mock": "warning"}.get(res["status"], "error")
+            ss.day_pct_forecast = res["day_pct"]
+            ss.day_pct_status = (level, res["message"])
+        except Exception as exc:  # noqa: BLE001
+            ss.day_pct_forecast = {}
+            ss.day_pct_status = ("error", f"Could not read the model day mix: {exc}")
+
 if ss.run_status:
     level, msg = ss.run_status
     getattr(st, level)(msg)
+
+if ss.day_pct_status:
+    level, msg = ss.day_pct_status
+    getattr(st, level)(msg)
+    if ss.day_pct_forecast:
+        st.info(
+            f"Model day percentages are loaded for {len(ss.day_pct_forecast)} stores but are "
+            "not driving the workbook yet. They vary by store, while every store currently "
+            "shares one flat weekday curve — switching means each store tab carries its own "
+            "day shares. Say the word and that change goes in."
+        )
 
 # --- derived ----------------------------------------------------------------------------
 holidays = default_holidays(YEAR)

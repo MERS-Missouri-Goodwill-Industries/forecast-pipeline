@@ -176,6 +176,91 @@ def horizon_check(first: dt.date | None, last: dt.date | None,
     return True, f"Forecast covers {first} to {last} ({covered} days of {plan_year})."
 
 
+# The model's own day-of-year shape, if the pipeline has started emitting it. Checked at
+# runtime rather than assumed -- this column did not exist in the table as of 2026-09-10.
+DAY_PCT_COLUMN = "day_of_year_forecast_pct"
+
+
+def fetch_day_pct_forecast(plan_year: int | None = None) -> dict:
+    """Offer the model's day-of-year percentages in place of the weekday-weight curve.
+
+    Returns {"status", "message", "day_pct", "stores", "columns"} where status is one of
+    "mock" | "missing_column" | "unusable" | "ok". Probes for the column first, because it
+    is not yet in the table and a hard-coded SELECT would surface as a raw SQL error.
+    """
+    probe = execute(f"SELECT * FROM {FORECAST_TABLE} LIMIT 1")
+    cols = probe.get("columns") or []
+
+    if probe.get("source") == "mock":
+        return {"status": "mock", "message": "Databricks not connected.",
+                "day_pct": {}, "stores": 0, "columns": cols}
+
+    if DAY_PCT_COLUMN not in cols:
+        return {
+            "status": "missing_column",
+            "message": (
+                f"The forecast table has no '{DAY_PCT_COLUMN}' column yet, so there is no "
+                f"model day-mix to use. Columns available: {', '.join(cols)}. "
+                "The weekday weights on this page are still driving the daily split."
+            ),
+            "day_pct": {}, "stores": 0, "columns": cols,
+        }
+
+    result = execute(
+        f"SELECT unique_id AS store_code, date, {DAY_PCT_COLUMN} AS day_pct, "
+        f"       MIN(date) OVER (PARTITION BY unique_id) AS first_date, "
+        f"       MAX(date) OVER (PARTITION BY unique_id) AS last_date "
+        f"FROM {FORECAST_TABLE} WHERE split = '{FORECAST_SPLIT}'"
+    )
+    rows = result.get("rows", [])
+    by_store: dict[str, dict[str, float]] = {}
+    firsts, lasts = [], []
+    for row in rows:
+        code, day = row.get("store_code"), _as_date(row.get("date"))
+        try:
+            pct = float(row.get("day_pct"))
+        except (TypeError, ValueError):
+            continue
+        if isinstance(code, str) and code.strip() and day:
+            by_store.setdefault(code.strip(), {})[day.isoformat()] = pct
+        f, l = _as_date(row.get("first_date")), _as_date(row.get("last_date"))
+        if f:
+            firsts.append(f)
+        if l:
+            lasts.append(l)
+
+    if not by_store:
+        return {"status": "unusable", "message": f"'{DAY_PCT_COLUMN}' exists but returned no "
+                "usable rows.", "day_pct": {}, "stores": 0, "columns": cols}
+
+    # Percentages that do not total 1.0 per store would silently rescale every daily figure.
+    off = {c: sum(v.values()) for c, v in by_store.items()}
+    bad = {c: t for c, t in off.items() if abs(t - 1.0) > 0.01}
+    if bad:
+        sample = ", ".join(f"{c} sums to {t:.4f}" for c, t in list(bad.items())[:3])
+        return {
+            "status": "unusable",
+            "message": (f"{len(bad)} of {len(off)} stores have day percentages that do not "
+                        f"total 100% ({sample}). Using them would rescale every daily figure, "
+                        "so they have not been applied."),
+            "day_pct": {}, "stores": len(off), "columns": cols,
+        }
+
+    if plan_year is not None:
+        ok, msg = horizon_check(min(firsts) if firsts else None,
+                               max(lasts) if lasts else None, plan_year)
+        if not ok:
+            return {"status": "unusable", "message": msg,
+                    "day_pct": {}, "stores": len(by_store), "columns": cols}
+
+    return {
+        "status": "ok",
+        "message": (f"Loaded model day percentages for {len(by_store)} stores; each totals "
+                    "100% across the year."),
+        "day_pct": by_store, "stores": len(by_store), "columns": cols,
+    }
+
+
 def parse_store_forecasts(result: dict,
                           plan_year: int | None = None) -> tuple[dict[str, float], str | None]:
     """Map the aggregated query result to {store_code: forecast_total}.

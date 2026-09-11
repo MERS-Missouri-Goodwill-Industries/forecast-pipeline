@@ -656,6 +656,60 @@ def test_short_horizon_is_refused_not_silently_summed():
     assert warn is None and len(parsed) == 5
 
 
+def test_day_mix_offer_reports_a_missing_column_instead_of_erroring():
+    """day_of_year_forecast_pct was not in the table as of 2026-09-10. A hard-coded SELECT
+    would surface as a raw SQL error, so the offer probes for the column and says plainly
+    that the weekday weights are still in charge."""
+    import databricks_io as io
+
+    real_execute = io.execute
+    try:
+        io.execute = lambda stmt: {
+            "columns": ["unique_id", "date", "forecast", "split", "segment"],
+            "rows": [{}], "source": "live",
+        }
+        res = io.fetch_day_pct_forecast(plan_year=YEAR)
+        assert res["status"] == "missing_column", res
+        assert io.DAY_PCT_COLUMN in res["message"]
+        assert "weekday weights" in res["message"], "must say what is still driving the split"
+        assert res["day_pct"] == {}
+    finally:
+        io.execute = real_execute
+
+
+def test_day_mix_offer_refuses_percentages_that_do_not_total_100_pct():
+    """Percentages that do not sum to 1.0 per store would rescale every daily figure."""
+    import databricks_io as io
+
+    real_execute = io.execute
+    try:
+        def fake(stmt):
+            cols = ["unique_id", "date", io.DAY_PCT_COLUMN, "split"]
+            if "LIMIT 1" in stmt:
+                return {"columns": cols, "rows": [{}], "source": "live"}
+            return {"columns": ["store_code", "date", "day_pct", "first_date", "last_date"],
+                    "rows": [{"store_code": "ALTS", "date": f"{YEAR}-01-0{d}", "day_pct": 0.1,
+                              "first_date": f"{YEAR}-01-01", "last_date": f"{YEAR}-12-31"}
+                             for d in range(1, 6)],   # sums to 0.5, not 1.0
+                    "source": "live"}
+        io.execute = fake
+        res = io.fetch_day_pct_forecast(plan_year=YEAR)
+        assert res["status"] == "unusable", res
+        assert "100%" in res["message"] and res["day_pct"] == {}
+    finally:
+        io.execute = real_execute
+
+
+def test_default_weekday_preset_is_the_2026_coo_weights():
+    """The COO plans against his own 2026 curve, so the app opens on it."""
+    seed = load_seed()
+    assert "excel_plan" in seed["dow_presets"], "the 2026 preset must exist"
+    app_src = (ROOT / "app.py").read_text(encoding="utf-8")
+    assert 'ss.setdefault("preset", "excel_plan")' in app_src, (
+        "default weekday preset should be the 2026 COO workbook weights"
+    )
+
+
 def test_horizon_check_boundaries():
     import databricks_io as io
     import datetime as _dt
