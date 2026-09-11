@@ -130,9 +130,12 @@ st.subheader("Export")
 with st.container(key="export_build"):
     if st.button("📥  Build Workbook", type="primary", use_container_width=True):
         with st.spinner("Generating 73 sheets…"):
+            # Pass the Databricks forecasts through, or the workbook silently rebuilds the
+            # proportional split and disagrees with the figures shown on this screen.
             data = workbook_bytes(
                 year=YEAR, stores=STORES, weights=ss.weights, holidays=holidays,
                 recommended_plan=ss.recommended_plan,
+                recommended_bases=dict(ss.db_forecasts) or None,
                 store_overrides={c: {"plan_base": v} for c, v in ss.overrides.items()},
             )
         file_name = f"POC_Prototype_{YEAR}_Planned_Sales_Workbook_{YEAR}.xlsx"

@@ -298,6 +298,7 @@ def build_workbook(
     weights: dict[str, float],
     holidays: list[dict],
     recommended_plan: float,
+    recommended_bases: dict[str, float] | None = None,
     store_overrides: dict[str, dict] | None = None,
     session_name: str | None = None,
     author: str = "vyamaykin@mersgoodwill.org",
@@ -311,9 +312,20 @@ def build_workbook(
     store_start = 14
     store_end = store_start + len(stores) - 1
 
-    # Two tracks ship in the workbook: the Recommended baseline (the untouched forecast
-    # split) and the COO Adjusted plan, which starts equal to it and is the editable one.
-    forecasted = compute_forecasted_bases(stores, recommended_plan)
+    # Two tracks ship in the workbook: the Recommended baseline and the COO Adjusted plan,
+    # which starts equal to it and is the editable one.
+    #
+    # Recommended is a base-sales-weighted split of recommended_plan unless real per-store
+    # forecasts are supplied, in which case those are the recommendation and the split only
+    # covers stores the forecast missed. Note the consequence: once any store comes from a
+    # forecast, the Recommended total no longer equals recommended_plan -- it equals what the
+    # model actually predicts, and recommended_plan becomes the COO's target to compare
+    # against. That is the honest reading; rescaling the model to hit a round number would
+    # just launder the forecast.
+    split = compute_forecasted_bases(stores, recommended_plan)
+    supplied = recommended_bases or {}
+    forecasted = {st["code"]: supplied.get(st["code"], split[st["code"]]) for st in stores}
+
     planned_sales: dict[str, float] = {}
     for st in stores:
         override_base = overrides.get(st["code"], {}).get("plan_base")
@@ -338,7 +350,8 @@ def build_workbook(
     dd = wb.create_sheet("Daily_Disaggregated_Plan")
     fg = wb.create_sheet("Final_Sales_Goals")
     _day_factors(wb, days, df_last)
-    _plan_inputs(wb, stores, forecasted, planned_sales, store_start, store_end)
+    _plan_inputs(wb, stores, forecasted, planned_sales, store_start, store_end,
+                 forecast_codes={st["code"] for st in stores if st["code"] in supplied})
 
     for idx, store in enumerate(stores):
         _store_tab(wb, store, store_start + idx, days, ranges, daily_total_row,
@@ -558,7 +571,8 @@ def _day_factors(wb: Workbook, days: list[dict], df_last: int) -> None:
 
 # --- Plan_Inputs -----------------------------------------------------------------------
 def _plan_inputs(wb: Workbook, stores: list[dict], recommended: dict[str, float],
-                 planned_sales: dict[str, float], start: int, end: int) -> None:
+                 planned_sales: dict[str, float], start: int, end: int,
+                 forecast_codes: set[str] | None = None) -> None:
     """Two money columns per store: the Recommended baseline (locked) and the COO Adjusted
     plan (editable), with the variance between them.
 
@@ -580,6 +594,25 @@ def _plan_inputs(wb: Workbook, stores: list[dict], recommended: dict[str, float]
         "the Recommended column is the forecast baseline and is deliberately left alone so "
         "you always keep the before-and-after comparison."
     )
+
+    # Where Recommended came from changes what the Recommended Total means, so say it on the
+    # sheet rather than leaving the reader to infer it from the number.
+    from_forecast = forecast_codes or set()
+    n_fc = sum(1 for st in stores if st["code"] in from_forecast)
+    if n_fc:
+        _note(s["A3"]).value = (
+            f"Recommended source: model forecast for {n_fc} of {len(stores)} stores"
+            + (f"; the remaining {len(stores) - n_fc} fall back to a base-sales-weighted "
+               "split of the plan total." if n_fc < len(stores) else ".")
+            + " Because these are real forecasts, the Recommended Total below is what the "
+              "model predicts -- it will not equal a round plan figure, and is not meant to."
+        )
+    else:
+        _note(s["A3"]).value = (
+            "Recommended source: a base-sales-weighted split of the plan total (no model "
+            "forecast was supplied), so the Recommended Total below equals that plan figure "
+            "by construction."
+        )
 
     rec_total = f"=SUM($E${start}:$E${end})"
     coo_total = f"=SUM($F${start}:$F${end})"

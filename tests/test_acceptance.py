@@ -427,6 +427,59 @@ def test_plan_inputs_carries_both_tracks_and_an_editable_total():
         assert s[f"H{r}"].value == f"=IF(E{r}=0,0,G{r}/E{r})"
 
 
+def test_supplied_forecasts_drive_the_recommended_column():
+    """The whole point of Run Forecast. Before this wiring existed the app showed model
+    numbers on screen while the workbook rebuilt the proportional split -- two different
+    sets of figures in one session, with nothing flagging the disagreement."""
+    stores = STORES[:3]
+    split = compute_forecasted_bases(stores, PLAN)
+    # A forecast for the first two stores only; the third must fall back to the split.
+    supplied = {stores[0]["code"]: 1_234_567.0, stores[1]["code"]: 2_000_000.0}
+
+    wb = build_workbook(year=YEAR, stores=stores, weights=WEIGHTS, holidays=HOLIDAYS,
+                        recommended_plan=PLAN, recommended_bases=supplied)
+    s = wb["Plan_Inputs"]
+
+    assert abs(s["E14"].value - 1_234_567.0) < 0.01, "forecast did not reach Recommended"
+    assert abs(s["E15"].value - 2_000_000.0) < 0.01
+    assert abs(s["E16"].value - split[stores[2]["code"]]) < 0.01, (
+        "an uncovered store must fall back to the proportional split"
+    )
+    # COO Adjusted seeds from Recommended, so it follows the forecast too.
+    assert abs(s["F14"].value - 1_234_567.0) < 0.01
+
+    # The sheet must say where Recommended came from -- the Recommended Total means
+    # something different depending on the answer.
+    note = str(s["A3"].value)
+    assert "model forecast for 2 of 3" in note, note
+    assert "will not equal a round plan figure" in note, note
+
+
+def test_recommended_defaults_to_the_split_when_no_forecast_supplied():
+    stores = STORES[:3]
+    split = compute_forecasted_bases(stores, PLAN)
+    wb = build_workbook(year=YEAR, stores=stores, weights=WEIGHTS, holidays=HOLIDAYS,
+                        recommended_plan=PLAN)
+    s = wb["Plan_Inputs"]
+    for i, st in enumerate(stores):
+        assert abs(s[f"E{14 + i}"].value - split[st["code"]]) < 0.01
+    assert "base-sales-weighted split" in str(s["A3"].value)
+
+
+def test_an_explicit_override_still_beats_a_supplied_forecast():
+    """Precedence: COO override > model forecast > proportional split."""
+    stores = STORES[:2]
+    code = stores[0]["code"]
+    wb = build_workbook(year=YEAR, stores=stores, weights=WEIGHTS, holidays=HOLIDAYS,
+                        recommended_plan=PLAN,
+                        recommended_bases={code: 1_000_000.0},
+                        store_overrides={code: {"plan_base": 500_000.0}})
+    s = wb["Plan_Inputs"]
+    assert abs(s["E14"].value - 1_000_000.0) < 0.01, "Recommended shows the forecast"
+    assert abs(s["F14"].value - 500_000.0) < 0.01, "COO Adjusted shows the override"
+    assert s["G14"].value == "=F14-E14", "variance exposes the difference"
+
+
 def test_recommended_column_is_untouched_by_an_override():
     """An override moves the COO track only. If it moved Recommended too, the variance would
     always read zero and the COO would have no before-and-after."""
