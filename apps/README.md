@@ -41,29 +41,49 @@ CI runs it on every push that touches the app.
 
 ---
 
-## Deploy from source
+## Deploy
 
-Set repo secrets: `DATABRICKS_HOST`, `DATABRICKS_CLIENT_ID`, `DATABRICKS_CLIENT_SECRET`
-(a service principal with `CAN_MANAGE` on apps). Then **Actions → Validate and deploy
-Databricks App → Run workflow**.
+**Merging to `main` is the deploy.** The app is
 
-Manually:
+| | |
+|---|---|
+| Name | `sales-forecast-workbook` |
+| URL | https://sales-forecast-workbook-201205741376717.17.azure.databricksapps.com |
+| Source | this repo, branch `main`, `SNAPSHOT` mode |
+| Compute | MEDIUM (0.5 DBU/hr) |
+
+It is bound to the repository in the Databricks Apps UI, so it resolves the head commit
+and redeploys itself. Nothing in CI deploys; the GitHub workflow only validates.
+
+Check what is actually live:
 
 ```bash
 databricks auth login --host https://adb-201205741376717.17.azuredatabricks.net
-
-APP=fy2027-sales-planning
-
-databricks apps create "$APP"
-databricks sync . "/Workspace/Shared/$APP" --full
-databricks apps deploy "$APP" --source-code-path "/Workspace/Shared/$APP"
+databricks apps get sales-forecast-workbook          # compute + app status
+databricks apps list-deployments sales-forecast-workbook
+databricks apps get-deployment sales-forecast-workbook <deployment-id>   # resolved_commit
 ```
 
-### After the first deploy — required
+`resolved_commit` is the ground truth for what the app is running — compare it to
+`git rev-parse main`.
 
-1. Apps UI → your app → **+ Add resource → SQL warehouse** → Serverless Starter →
-   grant the app's service principal `CAN_USE`.
-2. Grant that principal `SELECT` on `gold.retail_data_science`.
+> **Do not `databricks apps create`.** A second app is a second MEDIUM compute, billed in
+> parallel at roughly $200–350/month, and deploying with `--source-code-path` switches the
+> app off git-source mode onto workspace files.
+
+### Required once — not yet done
+
+As of 2026-09-11 the app reports `resources: null` — **no SQL warehouse is bound**, so it
+runs in mock mode and Run Forecast returns seeded numbers, not the model's.
+
+The service principal to grant is **`app-1rh467 sales-forecast-workbook`**
+(client id `3405259b-22a7-4e1f-9dba-d725b074735e`).
+
+1. Apps UI → the app → **+ Add resource → SQL warehouse** → Serverless Starter →
+   grant that service principal `CAN_USE`.
+2. Grant it `SELECT` on `gold.retail_data_science`.
+3. Confirm with `databricks apps get sales-forecast-workbook` — `resources` stops being
+   `null`.
 
 That injects `DATABRICKS_CLIENT_ID` / `DATABRICKS_CLIENT_SECRET`. The app detects them and
 switches from mock to OAuth on its own — no code change, no token in the repo.

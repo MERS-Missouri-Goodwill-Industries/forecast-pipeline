@@ -1,5 +1,17 @@
-name: Validate and deploy Databricks App
+name: Validate Databricks App
 
+# This workflow validates. It does NOT deploy.
+#
+# The app `sales-forecast-workbook` is bound to this repository (branch main, SNAPSHOT
+# mode) in the Databricks Apps UI, so it redeploys itself from the resolved commit --
+# no CLI step, no workspace sync, no secrets needed here.
+#
+# The deploy job that used to live here targeted an app name that does not exist
+# (`fy2027-sales-planning`) and ran `databricks apps create`, so running it would have
+# stood up a SECOND app on MEDIUM compute -- roughly $200-350/month billed in parallel
+# with the real one -- and switched that one off git-source mode onto workspace files.
+# It was removed rather than repointed.
+#
 # One app, one source directory: the Streamlit app at the repo root. A React/Express
 # prototype used to live in apps/sales-planning-node and was a selectable deploy target
 # here; it was retired because it shipped 525 npm packages -- and five open advisories,
@@ -54,37 +66,3 @@ jobs:
 
       - name: Acceptance + deployment config checks
         run: python tests/test_acceptance.py
-
-  deploy:
-    name: Deploy to Databricks
-    needs: [validate-python]
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    environment: databricks
-    env:
-      DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
-      DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
-      DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
-      APP_NAME: fy2027-sales-planning
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: databricks/setup-cli@main
-
-      - name: Sync source to workspace
-        run: |
-          TARGET="/Workspace/Shared/${APP_NAME}"
-          databricks sync . "$TARGET" --full
-
-      - name: Create app if absent
-        run: databricks apps create "$APP_NAME" || echo "app already exists"
-
-      - name: Deploy
-        run: |
-          databricks apps deploy "$APP_NAME" \
-            --source-code-path "/Workspace/Shared/${APP_NAME}"
-
-      - name: Report
-        run: |
-          echo "Deployed the Python app from the repo root"
-          echo "Bind the SQL warehouse as an App Resource in the Apps UI if not already done."
