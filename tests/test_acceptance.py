@@ -739,6 +739,41 @@ def test_day_mix_full_year_on_a_percent_scale_is_accepted():
         io.execute = real_execute
 
 
+def _contrast(fg: str, bg: str) -> float:
+    def lum(h):
+        h = h.lstrip("#")
+        chan = [int(h[i:i + 2], 16) / 255 for i in (0, 2, 4)]
+        f = lambda c: c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4  # noqa: E731
+        r, g, b = (f(c) for c in chan)
+        return 0.2126 * r + 0.7152 * g + 0.0722 * b
+    hi, lo = sorted((lum(fg), lum(bg)), reverse=True)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def test_highlight_colours_clear_wcag_aa_and_never_rely_on_the_theme():
+    """A fill set without a foreground inherits the theme's text colour. That put white on
+    amber at 1.21:1 -- invisible. Highlights set both, so the cell reads the same on a white
+    or a near-black page."""
+    import app as _app  # noqa: F401 - imported for its PAL constant only
+
+    ratio = _contrast(_app.PAL["flag_fg"], _app.PAL["flag_bg"])
+    assert ratio >= 4.5, f"highlight contrast {ratio:.2f}:1 is below WCAG AA (4.5:1)"
+
+    src = (ROOT / "app.py").read_text(encoding="utf-8")
+    # Every background-color we set must be accompanied by a colour on the same rule.
+    for line in src.splitlines():
+        if "background-color" in line and "PAL[" in line:
+            assert "color:" in line or "flag_fg" in line, (
+                f"background set without a foreground: {line.strip()}"
+            )
+
+
+def test_the_53_marker_is_not_colour_alone():
+    """WCAG 1.4.1. Colour-blind readers and greyscale printouts still need the signal."""
+    src = (ROOT / "app.py").read_text(encoding="utf-8")
+    assert 'f"{v:.0f} *" if v == 53' in src, "the 53 highlight needs a non-colour marker"
+
+
 def test_displayed_weekday_weights_total_exactly_100_pct():
     """The app showed 'Total: 100.01%' on the 2026 preset. Rounding each weekday
     independently to 2 decimals of a percent leaves a residual with nowhere to go. The

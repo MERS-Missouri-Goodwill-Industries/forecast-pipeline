@@ -1,0 +1,17 @@
+# Day / night are the reader's choice, made from the ⋮ menu → Settings → Appearance.
+# No `base` is pinned here on purpose: pinning one would override that choice and leave
+# half the audience with the theme they did not pick. app.py reads the active theme at
+# runtime (st.context.theme) and picks colours to match, so both look deliberate.
+#
+# primaryColor drives primary buttons. Streamlit's stock red reads as "destructive" —
+# Run Forecast and Build Workbook are the safe, expected actions on this page, so they get
+# a blue that says "primary" without saying "careful".
+[theme]
+primaryColor = "#1f6feb"
+
+[server]
+# The COO uploads nothing here; the app only reads from Unity Catalog and hands back a file.
+maxUploadSize = 5
+
+[browser]
+gatherUsageStats = false

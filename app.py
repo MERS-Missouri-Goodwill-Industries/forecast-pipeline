@@ -39,6 +39,24 @@ PRESET_LABELS = {
 
 st.set_page_config(page_title="Sales Planning", layout="wide")
 
+# --- theme ------------------------------------------------------------------------------
+# Day and night come from Streamlit's own menu (⋮ → Settings → Appearance); .streamlit/
+# config.toml deliberately pins no base so that choice is the reader's.
+#
+# The colours below do NOT branch on the active theme. st.context.theme reports the
+# *browser's* prefers-color-scheme, which is not always what Streamlit paints -- measured
+# here reporting "dark" while the page rendered light. Styling against a signal that can
+# disagree with the page is how you get an unreadable cell in one theme and never see it.
+#
+# So every highlight sets background AND foreground together and is self-contained: the
+# cell paints its own two colours, reads the same on a white or a near-black page, and
+# clears WCAG AA (4.5:1) either way. A fill without a foreground inherits the theme's text
+# colour -- that is exactly how amber ended up carrying white text at 1.21:1.
+PAL = {
+    "flag_bg": "#fde9a9", "flag_fg": "#3f2d00",   # 10.97:1, measured
+    "band": "#8c8c8c", "band_opacity": 0.22,      # mid grey: visible on either ground
+}
+
 
 def _init():
     ss = st.session_state
@@ -210,14 +228,22 @@ with c1:
             value=round(ss.weights_raw.get(d, 0.0) * 100, 2), step=0.01, format="%.2f",
             key=f"w_{d}",
         ) / 100
-    if new_weights != ss.weights_raw:
+    # Compare with a tolerance, not ==. The widget round-trip (x -> x*100 -> /100) comes
+    # back a single ULP off for some values -- 0.1289 returns as 0.12890000000000001 -- and
+    # exact equality read that as the user editing a weight, flipping the preset to "Custom"
+    # on first render before anyone had touched anything.
+    edited = any(abs(new_weights[d] - ss.weights_raw.get(d, 0.0)) > 5e-7 for d in WEEKDAYS)
+    if edited:
         ss.weights_raw = new_weights
         ss.weights = normalize_weights(new_weights)
         ss.preset = "custom"
         st.rerun()
 
     total_raw = sum(ss.weights_raw.values())
-    st.write(f"Total: {total_raw * 100:.2f}%")
+    if abs(total_raw - 1.0) < 5e-5:
+        st.success(f"Total: {total_raw * 100:.2f}%")
+    else:
+        st.warning(f"Total: {total_raw * 100:.2f}% — the seven weights should add to 100%.")
 
     st.subheader("Recommended Plan")
     plan = st.number_input("Network plan ($)", min_value=0.0,
@@ -249,13 +275,21 @@ with c2:
     counts.loc["Total Days"] = counts.sum()
     styled = (
         counts.style
-        .map(lambda v: "background-color:#fde9a9; font-weight:700" if v == 53 else "")
-        .set_properties(subset=[str(YEAR)], **{"background-color": "rgba(31,119,180,0.12)"})
-        .format("{:.0f}")
+        # Background and foreground are always set together. A fill on its own inherits the
+        # theme's text colour, which is how white-on-amber happened.
+        .map(lambda v: (f"background-color:{PAL['flag_bg']};color:{PAL['flag_fg']};"
+                        "font-weight:700") if v == 53 else "")
+        # The plan year is marked with weight, not a fill. A whole column of background
+        # colour is heavy in either theme, and typography carries "this is the one" without
+        # competing with the 53 highlight beside it.
+        .set_properties(subset=[str(YEAR)], **{"font-weight": "700"})
+        # The 53 also carries a marker, so the meaning does not live in colour alone
+        # (WCAG 1.4.1) -- colour-blind readers and greyscale printouts still get it.
+        .format(lambda v: f"{v:.0f} *" if v == 53 else f"{v:.0f}")
     )
     st.dataframe(styled, use_container_width=True)
-    st.caption(f"FY{YEAR} highlighted. A weekday shaded amber occurs 53 times that year instead of "
-               "the usual 52 — the extra selling day to weight for.")
+    st.caption(f"FY{YEAR} is shown in bold. **53 \\*** marks a weekday that falls 53 times "
+               "that year instead of the usual 52 — the extra selling day to weight for.")
 
     st.subheader("Planned Sales Comparison")
     recommended_monthly = build_store_plan(ss.recommended_plan, days)["monthly"]
@@ -282,13 +316,13 @@ with c2:
              "forecast": m["forecast"]}
             for m in band_months
         ])
-        band = alt.Chart(band_df).mark_area(opacity=0.18, color="#8c8c8c").encode(
+        band = alt.Chart(band_df).mark_area(opacity=PAL["band_opacity"], color=PAL["band"]).encode(
             x=alt.X("Month", sort=MONTH_ABBR, title=None),
             y=alt.Y("lower", title="Planned Sales ($)"),
             y2=alt.Y2("upper"),
             tooltip=["Month", "forecast", "lower", "upper"],
         )
-        mid = alt.Chart(band_df).mark_line(strokeDash=[4, 3], color="#8c8c8c").encode(
+        mid = alt.Chart(band_df).mark_line(strokeDash=[4, 3], color=PAL["band"]).encode(
             x=alt.X("Month", sort=MONTH_ABBR),
             y=alt.Y("forecast"),
         )
