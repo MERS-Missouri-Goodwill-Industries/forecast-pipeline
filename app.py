@@ -421,21 +421,18 @@ for h in history + [plan_row]:
 
 st.dataframe(rows, hide_index=True, use_container_width=True)
 
-# Total growth and per-store growth diverge exactly when the store count moves. Saying which
-# is which is the difference between "we grew" and "we opened stores".
+# The growth rate on this page is the rate on the total. Per-store growth was removed on
+# purpose: it moves whenever the store count moves, so it reads as a decline in any year the
+# roster grows, and the store count is already in the table for anyone who wants the average.
 last_hist = history[-1] if history else None
 if last_hist and plan_year_total:
     st.caption(f"FY{YEAR} figure is the **{source}** across {len(scoped)} stores "
                f"({plan_row['region']}).")
     if comparable:
         headline = plan_year_total / float(last_hist["total_plan"]) - 1
-        per_now = plan_year_total / len(scoped) if scoped else 0.0
-        per_then = float(last_hist["total_plan"]) / int(last_hist["stores"])
-        like = per_now / per_then - 1 if per_then else 0.0
         st.caption(
             f"Like-for-like against {last_hist['year']} ({hist_region}, "
-            f"{last_hist['stores']} stores): **{headline * 100:+.1f}%** on the total, "
-            f"**{like * 100:+.1f}%** per store."
+            f"{last_hist['stores']} stores): **{headline * 100:+.1f}%** on the total."
         )
     else:
         st.warning(
