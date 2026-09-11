@@ -1,13 +1,34 @@
-# Day / night are the reader's choice, made from the ⋮ menu → Settings → Appearance.
-# No `base` is pinned here on purpose: pinning one would override that choice and leave
-# half the audience with the theme they did not pick. app.py reads the active theme at
-# runtime (st.context.theme) and picks colours to match, so both look deliberate.
+# Day and night are both defined here, and the reader picks which one they get from the
+# ⋮ menu → Settings → Appearance (which itself defaults to following the operating system).
 #
-# primaryColor drives primary buttons. Streamlit's stock red reads as "destructive" —
+# No `base` is pinned on purpose. Pinning one would override that choice and leave half the
+# audience with the theme they did not pick. [theme] is the light palette, [theme.dark]
+# overrides it for dark mode -- so both are deliberate rather than one being stock.
+#
+# Every pair below clears WCAG AA (4.5:1), measured, and is asserted by
+# tests/test_acceptance.py::test_both_themes_are_defined_and_clear_wcag_aa.
+
+[theme]
+# primaryColor drives primary buttons. Streamlit's stock red reads as "destructive" --
 # Run Forecast and Build Workbook are the safe, expected actions on this page, so they get
 # a blue that says "primary" without saying "careful".
-[theme]
+#
+# The SAME blue serves both themes: white label on it is 4.63:1 (AA text), and against the
+# dark page it is 4.08:1, past the 3:1 floor for a UI component. A lighter blue would look
+# better against black but drops the label to 3.20:1, which is the trade that produces an
+# unreadable button.
 primaryColor = "#1f6feb"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f1f4f9"   # sidebar, table headers, code blocks
+textColor = "#1a1f2b"                  # 16.47:1 on white, 14.94:1 on the secondary
+linkColor = "#1f6feb"                  # 4.63:1
+
+[theme.dark]
+primaryColor = "#1f6feb"
+backgroundColor = "#0e1117"
+secondaryBackgroundColor = "#1c2230"
+textColor = "#e6e9ef"                  # 15.54:1 on the ground, 13.07:1 on the secondary
+linkColor = "#7aa9ff"                  # 8.05:1 -- the light link blue is too dark here
 
 [server]
 # The COO uploads nothing here; the app only reads from Unity Catalog and hands back a file.

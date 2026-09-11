@@ -866,6 +866,61 @@ def test_highlight_colours_clear_wcag_aa_and_never_rely_on_the_theme():
             )
 
 
+def test_both_themes_are_defined_and_clear_wcag_aa():
+    """Day and night are both authored, not one authored and one inherited from stock.
+
+    [theme] is the light palette and [theme.dark] overrides it; neither pins `base`, so the
+    reader's Appearance choice still decides which applies. Every text pair must clear AA
+    (4.5:1) in BOTH, because a palette is only half-checked if it is only checked on white.
+    """
+    import tomllib
+
+    cfg = tomllib.loads((ROOT / ".streamlit" / "config.toml").read_text(encoding="utf-8"))
+    theme = cfg.get("theme", {})
+    dark = theme.get("dark", {})
+    assert theme, "no [theme] section: the light palette would fall back to stock"
+    assert dark, "no [theme.dark] section: dark mode would fall back to stock"
+    assert "base" not in theme, (
+        "pinning theme.base overrides the reader's Appearance choice, so half the audience "
+        "gets the theme they did not pick"
+    )
+
+    # [theme.dark] inherits anything it does not override, which is how a dark palette ends
+    # up with a light background nobody set.
+    light = {k: v for k, v in theme.items() if isinstance(v, str)}
+    modes = {"light": light, "dark": {**light, **dark}}
+
+    for mode, pal in modes.items():
+        for key in ("primaryColor", "backgroundColor", "secondaryBackgroundColor",
+                    "textColor", "linkColor"):
+            assert key in pal, f"{mode} theme is missing {key}"
+
+        for ground in ("backgroundColor", "secondaryBackgroundColor"):
+            ratio = _contrast(pal["textColor"], pal[ground])
+            assert ratio >= 4.5, f"{mode}: text on {ground} is {ratio:.2f}:1, below AA"
+
+        ratio = _contrast(pal["linkColor"], pal["backgroundColor"])
+        assert ratio >= 4.5, f"{mode}: links are {ratio:.2f}:1, below AA"
+
+        # Primary buttons carry a white label. A blue light enough to pop against a dark
+        # page drops that label below AA -- the trade that makes a button unreadable.
+        ratio = _contrast("#ffffff", pal["primaryColor"])
+        assert ratio >= 4.5, f"{mode}: white on primaryColor is {ratio:.2f}:1, below AA"
+
+        # 3:1 is the WCAG floor for a UI component against its surroundings (1.4.11).
+        ratio = _contrast(pal["primaryColor"], pal["backgroundColor"])
+        assert ratio >= 3.0, f"{mode}: buttons are {ratio:.2f}:1 against the page"
+
+    # [theme.dark] is ignored before Streamlit 1.46 -- silently, leaving stock dark.
+    req = (ROOT / "requirements.txt").read_text(encoding="utf-8")
+    floor = re.search(r"streamlit>=(\d+)\.(\d+)", req)
+    assert floor, "requirements.txt must pin a streamlit floor"
+    major, minor = int(floor.group(1)), int(floor.group(2))
+    assert (major, minor) >= (1, 46), (
+        f"streamlit>={major}.{minor} predates [theme.dark]; dark mode would be stock"
+    )
+
+
 def test_the_53_marker_is_not_colour_alone():
     """WCAG 1.4.1. Colour-blind readers and greyscale printouts still need the signal."""
     src = (ROOT / "app.py").read_text(encoding="utf-8")
