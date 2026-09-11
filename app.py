@@ -76,6 +76,7 @@ def _init():
     ss.setdefault("day_pct_forecast", {})
     ss.setdefault("forecast_band", {})
     ss.setdefault("use_model_day_mix", False)
+    ss.setdefault("plan_source", "manual")
 
 
 _init()
@@ -115,6 +116,12 @@ with right:
                 rec = dbx.reconcile(parsed, [s["code"] for s in STORES])
                 ss.db_forecasts = {k: v for k, v in parsed.items()
                                    if k in {s["code"] for s in STORES}}
+                # The forecast IS the recommendation. Leaving the network plan on a typed
+                # round number would keep every store that the forecast does not cover on a
+                # share of a figure nobody stands behind.
+                if ss.db_forecasts:
+                    ss.recommended_plan = float(sum(ss.db_forecasts.values()))
+                    ss.plan_source = "forecast"
                 level = "success" if rec["matched"] == rec["expected"] else "error"
                 msg = f"Matched {rec['matched']} of {rec['expected']} stores."
                 if rec["matched"] < rec["expected"]:
@@ -265,7 +272,13 @@ with c1:
                            value=float(ss.recommended_plan), step=1_000_000.0, format="%.0f")
     if plan != ss.recommended_plan:
         ss.recommended_plan = plan
+        ss.plan_source = "manual"
         st.rerun()
+    if ss.plan_source == "forecast":
+        st.caption(f"From the Databricks forecast, {len(ss.db_forecasts)} stores. "
+                   "Type over it to plan against a different number.")
+    else:
+        st.caption("Typed in. Run Forecast to set this from the model instead.")
 
     st.subheader("COO Adjusted Plan")
     st.caption("This is the total sales goal that will be in the downloaded workbook.")
@@ -351,6 +364,71 @@ with c2:
     else:
         st.altair_chart(lines, use_container_width=True)
         st.caption("Run Forecast to overlay the model's forecast spread on this chart.")
+
+# --- year over year ----------------------------------------------------------------------
+st.subheader("Year-over-Year Planned Sales")
+
+scope = st.radio(
+    "Compare", ["All stores", "East only", "West only"], horizontal=True,
+    help="The 2025 and 2026 plans covered 46 and 47 stores; the roster is 65. Scoping to a "
+         "region lets you compare a like-for-like set instead of reading a change in network "
+         "size as growth.",
+)
+scoped = [s for s in STORES
+          if scope == "All stores" or s["region"] == scope.replace(" only", "")]
+scoped_codes = {s["code"] for s in scoped}
+
+# The plan-year figure is the Databricks forecast when it is loaded -- that is the
+# forecast-implied number Mark asked for -- and the committed plan otherwise. Which one is in
+# play changes what the growth rate means, so the table says so rather than leaving it implied.
+if ss.db_forecasts:
+    plan_year_total = sum(v for c, v in ss.db_forecasts.items() if c in scoped_codes)
+    source = "Databricks forecast"
+else:
+    plan_year_total = sum(v for c, v in effective.items() if c in scoped_codes)
+    source = "COO Adjusted plan"
+
+history = SEED.get("plan_history", [])
+rows, prev = [], None
+for h in history + [{"year": YEAR, "total_plan": plan_year_total, "stores": len(scoped)}]:
+    total, n = float(h["total_plan"]), int(h["stores"])
+    per_store = total / n if n else 0.0
+    row = {"Year": h["year"], "Stores": n,
+           "Total Plan": f"${total:,.0f}", "Avg per Store": f"${per_store:,.0f}",
+           "YoY Total": "—", "YoY per Store": "—"}
+    if prev:
+        p_total, p_n = prev
+        p_per = p_total / p_n if p_n else 0.0
+        if p_total:
+            row["YoY Total"] = f"{(total / p_total - 1) * 100:+.1f}%"
+        if p_per:
+            row["YoY per Store"] = f"{(per_store / p_per - 1) * 100:+.1f}%"
+    rows.append(row)
+    prev = (total, n)
+
+st.dataframe(rows, hide_index=True, use_container_width=True)
+
+# Total growth and per-store growth diverge exactly when the store count moves. Saying which
+# is which is the difference between "we grew" and "we opened stores".
+last_hist = history[-1] if history else None
+if last_hist and plan_year_total:
+    delta_stores = len(scoped) - int(last_hist["stores"])
+    headline = plan_year_total / float(last_hist["total_plan"]) - 1
+    per_now = plan_year_total / len(scoped) if scoped else 0.0
+    per_then = float(last_hist["total_plan"]) / int(last_hist["stores"])
+    like_for_like = per_now / per_then - 1 if per_then else 0.0
+    st.caption(
+        f"FY{YEAR} figure is the **{source}** across {len(scoped)} stores. Against "
+        f"{last_hist['year']}: **{headline * 100:+.1f}%** on the total, "
+        f"**{like_for_like * 100:+.1f}%** per store."
+    )
+    if abs(delta_stores) >= 2:
+        st.warning(
+            f"The store count moves {delta_stores:+d} between {last_hist['year']} "
+            f"({last_hist['stores']}) and FY{YEAR} ({len(scoped)}), so the total-plan growth "
+            "above is not growth at existing stores — most of it is a larger network. "
+            "**YoY per Store** is the comparable figure, or scope this to one region."
+        )
 
 # --- per-store --------------------------------------------------------------------------
 st.subheader("Stores")

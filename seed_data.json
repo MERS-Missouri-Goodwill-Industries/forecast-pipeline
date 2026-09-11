@@ -501,5 +501,17 @@
       "date": "2027-12-25",
       "label": "Christmas Day"
     }
+  ],
+  "plan_history": [
+    {
+      "year": 2025,
+      "total_plan": 104300000,
+      "stores": 46
+    },
+    {
+      "year": 2026,
+      "total_plan": 120800000,
+      "stores": 47
+    }
   ]
 }
