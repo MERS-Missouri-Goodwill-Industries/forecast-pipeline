@@ -214,11 +214,26 @@ def test_weekday_mix_table():
 # =========================================================================================
 # Workbook structure
 # =========================================================================================
-def _wb(subset=None, overrides=None):
+def _wb(subset=None, overrides=None, growth_rate=None):
+    kw = {} if growth_rate is None else {"growth_rate": growth_rate}
     return build_workbook(
         year=YEAR, stores=subset or STORES, weights=WEIGHTS, holidays=HOLIDAYS,
-        recommended_plan=PLAN, store_overrides=overrides,
+        recommended_plan=PLAN, store_overrides=overrides, **kw,
     )
+
+
+def _recommended(s, row):
+    """Plan_Inputs column E is `=J{row}*$B$8` and B8 is `=B4*(1+B9)`. openpyxl never
+    evaluates a formula, so reproduce the arithmetic and assert the shape while we are here
+    -- a test that silently stopped resolving the real chain would pass on anything."""
+    assert s[f"E{row}"].value == f"=J{row}*$B$8", s[f"E{row}"].value
+    assert s["B8"].value == "=B4*(1+B9)", s["B8"].value
+    return float(s[f"J{row}"].value) * float(s["B4"].value) * (1.0 + float(s["B9"].value))
+
+
+def _forecast_of(s, row):
+    """The store's share of the model forecast, before any growth is applied."""
+    return float(s[f"J{row}"].value) * float(s["B4"].value)
 
 
 def test_workbook_shape():
@@ -408,24 +423,31 @@ def test_plan_inputs_carries_both_tracks_and_an_editable_total():
     s = wb["Plan_Inputs"]
     start, end = 14, 14 + 3 - 1
 
-    assert [s.cell(13, c).value for c in range(1, 9)] == [
+    assert [s.cell(13, c).value for c in range(1, 11)] == [
         "Code", "Name", "Region", "Status", "Recommended Planned Sales",
-        "COO Adjusted Planned Sales", "Variance ($)", "Variance (%)"]
+        "COO Adjusted Planned Sales", "Variance ($)", "Variance (%)",
+        "% of Agency", "Multiplier"]
 
-    assert s["B4"].value == f"=SUM($E${start}:$E${end})", "Recommended total"
+    # B4 is a constant on purpose. Column E is priced off it, so `=SUM(E)` would be a
+    # circular reference -- Excel would blank the whole sheet rather than warn.
+    assert isinstance(s["B4"].value, (int, float)), f"B4 must be a constant, got {s['B4'].value!r}"
     assert s["B6"].value == f"=SUM($F${start}:$F${end})", "COO total is bottom-up from stores"
     assert s["B7"].value == "=B6-B5", "allocation-vs-total reconciliation"
-    assert s["B9"].value == "=B6-B4", "variance vs Recommended"
+    assert s["B8"].value == "=B4*(1+B9)", "planned total is the forecast plus growth"
+    assert s["B10"].value == "=B6-B8", "variance vs Recommended"
 
-    # The COO's top-line number is a typed value, not a formula -- it is theirs to change.
+    # The two typed cells on this sheet. Everything else here recalculates.
     assert isinstance(s["B5"].value, (int, float)), f"B5 must be editable, got {s['B5'].value!r}"
+    assert isinstance(s["B9"].value, (int, float)), f"B9 must be editable, got {s['B9'].value!r}"
 
     for i in range(3):
         r = start + i
-        assert isinstance(s[f"E{r}"].value, (int, float)), "Recommended is a seeded number"
+        assert s[f"E{r}"].value == f"=J{r}*$B$8", "Recommended follows the growth rate"
         assert isinstance(s[f"F{r}"].value, (int, float)), "COO Adjusted is a seeded number"
+        assert isinstance(s[f"J{r}"].value, (int, float)), "the multiplier is a constant"
         assert s[f"G{r}"].value == f"=F{r}-E{r}"
         assert s[f"H{r}"].value == f"=IF(E{r}=0,0,G{r}/E{r})"
+        assert s[f"I{r}"].value == f"=IF($B$6=0,0,F{r}/$B$6)", "% of agency is of the COO total"
 
 
 def _model_day_pct(days, skew=0.0, scale=1.0):
@@ -507,13 +529,15 @@ def test_supplied_forecasts_drive_the_recommended_column():
                         recommended_plan=PLAN, recommended_bases=supplied)
     s = wb["Plan_Inputs"]
 
-    assert abs(s["E14"].value - 1_234_567.0) < 0.01, "forecast did not reach Recommended"
-    assert abs(s["E15"].value - 2_000_000.0) < 0.01
-    assert abs(s["E16"].value - split[stores[2]["code"]]) < 0.01, (
+    assert abs(_forecast_of(s, 14) - 1_234_567.0) < 0.01, "forecast did not reach Recommended"
+    assert abs(_forecast_of(s, 15) - 2_000_000.0) < 0.01
+    assert abs(_forecast_of(s, 16) - split[stores[2]["code"]]) < 0.01, (
         "an uncovered store must fall back to the proportional split"
     )
-    # COO Adjusted seeds from Recommended, so it follows the forecast too.
-    assert abs(s["F14"].value - 1_234_567.0) < 0.01
+    # COO Adjusted seeds from Recommended, so it follows the forecast AND the growth on it.
+    # Seeding from the ungrown forecast would open the workbook already down by the growth.
+    assert abs(s["F14"].value - _recommended(s, 14)) < 0.01
+    assert abs(s["F14"].value - 1_234_567.0 * (1 + float(s["B9"].value))) < 0.01
 
     # The sheet must say where Recommended came from -- the Recommended Total means
     # something different depending on the answer.
@@ -529,7 +553,7 @@ def test_recommended_defaults_to_the_split_when_no_forecast_supplied():
                         recommended_plan=PLAN)
     s = wb["Plan_Inputs"]
     for i, st in enumerate(stores):
-        assert abs(s[f"E{14 + i}"].value - split[st["code"]]) < 0.01
+        assert abs(_forecast_of(s, 14 + i) - split[st["code"]]) < 0.01
     assert "base-sales-weighted split" in str(s["A3"].value)
 
 
@@ -542,7 +566,7 @@ def test_an_explicit_override_still_beats_a_supplied_forecast():
                         recommended_bases={code: 1_000_000.0},
                         store_overrides={code: {"plan_base": 500_000.0}})
     s = wb["Plan_Inputs"]
-    assert abs(s["E14"].value - 1_000_000.0) < 0.01, "Recommended shows the forecast"
+    assert abs(_forecast_of(s, 14) - 1_000_000.0) < 0.01, "Recommended shows the forecast"
     assert abs(s["F14"].value - 500_000.0) < 0.01, "COO Adjusted shows the override"
     assert s["G14"].value == "=F14-E14", "variance exposes the difference"
 
@@ -554,15 +578,94 @@ def test_recommended_column_is_untouched_by_an_override():
     baseline = compute_forecasted_bases(STORES[:3], PLAN)[code]
     wb = _wb(STORES[:3], overrides={code: {"plan_base": baseline * 1.10}})
     s = wb["Plan_Inputs"]
-    assert abs(s["E14"].value - baseline) < 0.01, "override leaked into Recommended"
+    assert abs(_forecast_of(s, 14) - baseline) < 0.01, "override leaked into Recommended"
     assert abs(s["F14"].value - baseline * 1.10) < 0.01, "override not applied to COO Adjusted"
+
+
+def test_the_growth_rate_reaches_every_store_and_the_shares_total_one():
+    """B9 is the lever the model cannot pull for itself, so it has to actually move things.
+
+    Guards the three ways the hand-built version of this sheet was inert:
+
+    1. The share column summed to 0.9709, so the network total quietly missed 2.9% of
+       itself -- about $4.5M on a $155M plan -- with nothing on screen saying so.
+    2. `Sum of Store Plans` and `COO Adjusted Total` were the same SUM(F), so the balance
+       check subtracted a number from itself and read "Balanced" no matter what.
+    3. Nothing referenced the growth rate at all. Typing 10% into it changed one display
+       cell and not one store's goal.
+    """
+    stores = STORES[:5]
+    forecasts = {st["code"]: 1_000_000.0 * (i + 1) for i, st in enumerate(stores)}
+    total_forecast = sum(forecasts.values())
+
+    for growth in (0.0, 0.05, 0.12):
+        wb = build_workbook(year=YEAR, stores=stores, weights=WEIGHTS, holidays=HOLIDAYS,
+                            recommended_plan=PLAN, recommended_bases=forecasts,
+                            growth_rate=growth)
+        s = wb["Plan_Inputs"]
+        start, end = 14, 14 + len(stores) - 1
+
+        assert abs(float(s["B9"].value) - growth) < 1e-12, "growth rate did not reach B9"
+        assert abs(float(s["B4"].value) - total_forecast) < 0.01, "B4 is the forecast total"
+
+        # 1. Exactly 1, not 0.9709. Rounding 65 shares independently leaves a residual;
+        #    the largest store absorbs it.
+        shares = [float(s[f"J{r}"].value) for r in range(start, end + 1)]
+        assert abs(sum(shares) - 1.0) < 1e-9, f"multipliers total {sum(shares)!r}, not 1"
+
+        # 3. Every store moves with the rate, and they still add to the grown total.
+        resolved = [_recommended(s, r) for r in range(start, end + 1)]
+        for i, st in enumerate(stores):
+            expected = forecasts[st["code"]] * (1 + growth)
+            assert abs(resolved[i] - expected) < 0.01, (
+                f"{st['code']} at growth {growth}: {resolved[i]:,.2f} != {expected:,.2f}"
+            )
+        assert abs(sum(resolved) - total_forecast * (1 + growth)) < 0.01
+
+    # 2. The balance check must compare the store rows against the TYPED total in B5.
+    #    B6 and B7 holding the same formula is what made it always read zero.
+    assert s["B7"].value == "=B6-B5"
+    assert s["B6"].value != s["B5"].value, "the check would be comparing a cell to itself"
+    assert "SUM" not in str(s["B5"].value), "B5 is typed, not summed"
+
+
+def test_the_screen_and_the_file_apply_growth_the_same_way():
+    """app.py computes `effective` for the screen; workbook.py computes `planned_sales` for
+    the file. They are two implementations of one rule, and this project has already shipped
+    that shape of bug once -- 60 stores disagreed between the page and the download because
+    the forecasts were never passed through. Growth is a second chance to do it again.
+    """
+    stores = STORES[:4]
+    forecasts = {st["code"]: 2_000_000.0 + 100_000 * i for i, st in enumerate(stores)}
+    override_code = stores[1]["code"]
+    overrides = {override_code: 9_999_999.0}
+    growth = 0.07
+
+    # The screen's rule, lifted from app.py.
+    screen = {c: (overrides[c] if c in overrides else forecasts[c] * (1.0 + growth))
+              for c in forecasts}
+
+    wb = build_workbook(year=YEAR, stores=stores, weights=WEIGHTS, holidays=HOLIDAYS,
+                        recommended_plan=PLAN, recommended_bases=forecasts,
+                        growth_rate=growth,
+                        store_overrides={c: {"plan_base": v} for c, v in overrides.items()})
+    s = wb["Plan_Inputs"]
+    for i, st in enumerate(stores):
+        file_value = float(s[f"F{14 + i}"].value)
+        assert abs(file_value - screen[st["code"]]) < 0.01, (
+            f"{st['code']}: screen {screen[st['code']]:,.2f} != file {file_value:,.2f}"
+        )
+    assert abs(float(s["B5"].value) - sum(screen.values())) < 0.01, "top line disagrees"
+
+    # An override is a decision, not a baseline: growth must not be applied on top of it.
+    assert abs(float(s[f"F{15}"].value) - 9_999_999.0) < 0.01, "growth marked up an override"
 
 
 def test_exec_summary_shows_both_numbers_and_the_variance():
     wb = _wb(STORES[:3])
     s = wb[EXEC_CAL_SHEET_NAME]
     assert s["A5"].value == "Recommended Planned Sales ($)"
-    assert s["B5"].value == "='Plan_Inputs'!$B$4"
+    assert s["B5"].value == "='Plan_Inputs'!$B$8", "must mirror the grown total, not B4"
     assert s["A6"].value == "COO Adjusted Planned Sales ($)"
     assert s["B6"].value == "='Plan_Inputs'!$B$6"
     assert s["A7"].value == "Variance ($)" and s["B7"].value == "=B6-B5"
@@ -646,10 +749,12 @@ def test_how_to_use_states_what_can_and_cannot_change():
     text = " ".join(str(c.value) for row in s.iter_rows() for c in row if c.value)
     assert "WHAT YOU CAN CHANGE" in text
     assert "WHAT NOT TO CHANGE" in text
-    # The three levers the COO actually has authority over.
+    # The four levers the COO actually has authority over.
     assert "1. The total" in text
-    assert "2. The day inputs" in text
+    assert "2. Growth rate factor" in text
     assert "3. Any individual store" in text
+    assert "4. The day inputs for the store" in text
+    assert "Plan_Inputs cell B9" in text, "the growth lever must name its cell"
 
 
 def _agg_result(rows):
