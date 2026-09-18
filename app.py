@@ -52,9 +52,20 @@ st.set_page_config(page_title="Sales Planning", layout="wide")
 # cell paints its own two colours, reads the same on a white or a near-black page, and
 # clears WCAG AA (4.5:1) either way. A fill without a foreground inherits the theme's text
 # colour -- that is exactly how amber ended up carrying white text at 1.21:1.
+# Chart hues are validated, not chosen by eye. scripts/validate_palette.js from the
+# dataviz skill, run against BOTH of this app's surfaces (#ffffff light, #0e1117 dark):
+# blue #2a78d6 with red #e34948 passes every check in both modes -- lightness band,
+# chroma floor, CVD separation (worst adjacent dE 21.6 protan), normal-vision floor
+# (32.3) and 3:1 contrast -- so one fixed pair serves day and night, no theme branching.
+#
+# "band" is deliberately the de-emphasis grey and fails the chroma floor on purpose: it
+# is context, not a categorical series, and it still separates from the plan blue at
+# dE 15.3 under CVD.
 PAL = {
     "flag_bg": "#fde9a9", "flag_fg": "#3f2d00",   # 10.97:1, measured
     "band": "#8c8c8c", "band_opacity": 0.22,      # mid grey: visible on either ground
+    "plan": "#2a78d6",                            # the plan line -- one series, one hue
+    "above": "#2a78d6", "below": "#e34948",        # diverging by sign, warm vs cool poles
 }
 
 
@@ -190,8 +201,8 @@ forecasted = {**algorithmic, **ss.db_forecasts}
 # typed; every other store carries the forecast grown by the rate. If this screen applied
 # growth differently from the workbook, the download would disagree with the page that
 # produced it -- store by store, with nothing flagging it.
-effective = {c: (ss.overrides[c] if c in ss.overrides
-                 else forecasted.get(c, 0.0) * (1.0 + ss.growth_rate))
+recommended_of = {c: forecasted.get(c, 0.0) * (1.0 + ss.growth_rate) for c in forecasted}
+effective = {c: ss.overrides[c] if c in ss.overrides else recommended_of[c]
              for c in forecasted}
 coo_total = sum(effective.values())
 
@@ -302,8 +313,8 @@ with c1:
     # Escaped dollar signs: Streamlit reads a $...$ pair as LaTeX, so three of them in one
     # caption swallowed the middle number and rendered "150,000,000+5.00157,500,000".
     _fc_total = sum(forecasted.values())
-    st.caption(f"Forecast \${_fc_total:,.0f} "
-               f"+ {ss.growth_rate * 100:.2f}% = **\${_fc_total * (1 + ss.growth_rate):,.0f}** "
+    st.caption(f"Forecast \\${_fc_total:,.0f} "
+               f"+ {ss.growth_rate * 100:.2f}% = **\\${_fc_total * (1 + ss.growth_rate):,.0f}** "
                "before any store override.")
 
     st.subheader("COO Adjusted Plan")
@@ -345,51 +356,134 @@ with c2:
     st.caption(f"FY{YEAR} is shown in bold. **53 \\*** marks a weekday that falls 53 times "
                "that year instead of the usual 52 — the extra selling day to weight for.")
 
-    st.subheader("Planned Sales Comparison")
-    recommended_monthly = build_store_plan(ss.recommended_plan, days)["monthly"]
-    coo_monthly = build_store_plan(coo_total, days)["monthly"]
-    chart_df = pd.DataFrame({
-        "Month": MONTH_ABBR * 2,
-        "Series": ["Recommended Plan"] * 12 + ["COO Adjusted Plan"] * 12,
-        "Planned Sales": recommended_monthly + coo_monthly,
-    })
-    lines = alt.Chart(chart_df).mark_line(point=True).encode(
-        x=alt.X("Month", sort=MONTH_ABBR, title=None),
-        y=alt.Y("Planned Sales", title="Planned Sales ($)"),
-        color=alt.Color("Series", title=None),
-        tooltip=["Month", "Series", "Planned Sales"],
-    )
+    # One series, not two. The previous chart drew "Recommended Plan" and "COO Adjusted
+    # Plan" as separate lines, but both came from build_store_plan(total, days) with the
+    # same `days` -- so they were exactly proportional: one shape drawn twice, a
+    # constant ratio apart (measured spread across the 12 monthly ratios: 2.2e-16).
+    # Neither line carried any per-store or per-day information, so nothing the COO
+    # changed store-side could ever move them. The comparison that matters is per store,
+    # and it is the chart below.
+    st.subheader(f"Monthly Plan — FY{YEAR}")
+    plan_monthly = build_store_plan(coo_total, days)["monthly"]
+    plan_df = pd.DataFrame({"Month": MONTH_ABBR, "Planned Sales": plan_monthly})
 
-    # The model's prediction interval, drawn behind the plan lines for the months it
-    # actually covers. Where the band stops is where the forecast stops -- that gap is the
-    # clearest statement of the horizon limit available.
     band_months = ss.forecast_band.get("months") if ss.forecast_band else None
+    y_title = "Planned Sales ($)"
+
     if band_months:
+        # Two marks on screen now, so identity cannot rest on colour alone -- both get a
+        # legend entry. A constant-value colour field per layer is what makes Altair emit
+        # one shared legend instead of two unlabelled layers.
         band_df = pd.DataFrame([
             {"Month": m["month"], "lower": m["lower"], "upper": m["upper"],
-             "forecast": m["forecast"]}
+             "forecast": m["forecast"], "Series": "Model forecast range"}
             for m in band_months
         ])
-        band = alt.Chart(band_df).mark_area(opacity=PAL["band_opacity"], color=PAL["band"]).encode(
-            x=alt.X("Month", sort=MONTH_ABBR, title=None),
-            y=alt.Y("lower", title="Planned Sales ($)"),
+        plan_df["Series"] = "Your plan"
+        scale = alt.Scale(domain=["Your plan", "Model forecast range"],
+                          range=[PAL["plan"], PAL["band"]])
+        band = alt.Chart(band_df).mark_area(opacity=PAL["band_opacity"]).encode(
+            x=alt.X("Month", sort=MONTH_ABBR, title=None,
+                    axis=alt.Axis(labelAngle=0)),
+            y=alt.Y("lower", title=y_title, scale=alt.Scale(zero=False)),
             y2=alt.Y2("upper"),
+            color=alt.Color("Series:N", scale=scale, title=None),
             tooltip=["Month", "forecast", "lower", "upper"],
         )
         mid = alt.Chart(band_df).mark_line(strokeDash=[4, 3], color=PAL["band"]).encode(
-            x=alt.X("Month", sort=MONTH_ABBR),
+            x=alt.X("Month", sort=MONTH_ABBR, axis=alt.Axis(labelAngle=0)),
             y=alt.Y("forecast"),
         )
-        st.altair_chart(band + mid + lines, use_container_width=True)
-        covered = {m["month"] for m in band_months}
+        line = alt.Chart(plan_df).mark_line(point=True, strokeWidth=2).encode(
+            x=alt.X("Month", sort=MONTH_ABBR, title=None,
+                    axis=alt.Axis(labelAngle=0)),
+            y=alt.Y("Planned Sales", title=y_title,
+                    scale=alt.Scale(zero=False)),
+            color=alt.Color("Series:N", scale=scale, title=None),
+            tooltip=["Month", "Planned Sales"],
+        )
+        st.altair_chart(band + mid + line, use_container_width=True)
+        covered = [m["month"] for m in band_months]
         st.caption(
-            f"Grey band = model forecast spread (forecast_lower to forecast_upper), "
-            f"covering {len(covered)} of 12 months: {', '.join(m['month'] for m in band_months)}. "
+            f"Grey band = the model's forecast range (forecast_lower to forecast_upper), "
+            f"covering {len(covered)} of 12 months: {', '.join(covered)}. Where the band "
+            f"stops is where the forecast stops. Read the two against each other with care: "
+            f"your plan is spread by the weekday weights, the band by the model's own "
+            f"monthly shape, so a gap can be method rather than disagreement. "
             f"{ss.forecast_band.get('message', '')}"
         )
     else:
-        st.altair_chart(lines, use_container_width=True)
-        st.caption("Run Forecast to overlay the model's forecast spread on this chart.")
+        line = alt.Chart(plan_df).mark_line(
+            point=True, strokeWidth=2, color=PAL["plan"]
+        ).encode(
+            x=alt.X("Month", sort=MONTH_ABBR, title=None,
+                    axis=alt.Axis(labelAngle=0)),
+            y=alt.Y("Planned Sales", title=y_title,
+                    scale=alt.Scale(zero=False)),
+            tooltip=["Month", "Planned Sales"],
+        )
+        st.altair_chart(line, use_container_width=True)
+        st.caption("The COO Adjusted plan spread across the year by the weekday weights — "
+                   "the shape every daily cell in the workbook is priced off. The vertical "
+                   "axis does not start at zero, so the month-to-month differences are "
+                   "readable; the table below carries the actual dollars. Run Forecast to "
+                   "overlay the model's forecast range.")
+
+    # A tooltip must never be the only way to read a value.
+    with st.expander("Monthly plan as a table"):
+        st.dataframe(
+            [{"Month": m, "Planned Sales": f"${v:,.0f}",
+              "% of Year": f"{(v / coo_total * 100) if coo_total else 0:.2f}%"}
+             for m, v in zip(MONTH_ABBR, plan_monthly)],
+            hide_index=True, use_container_width=True,
+        )
+
+    # The real decision surface: what the COO moved, per store. Rendered only when there
+    # is something to render -- an axis with no bars is worse than a sentence.
+    st.subheader("What You Changed")
+    deltas = sorted(
+        ((c, ss.overrides[c] - recommended_of.get(c, 0.0))
+         for c in ss.overrides if c in recommended_of),
+        key=lambda t: abs(t[1]), reverse=True,
+    )
+    deltas = [(c, d) for c, d in deltas if abs(d) >= 0.01]
+    if not deltas:
+        st.caption("No store overrides yet — every store is carrying its Recommended "
+                   "number, so the plan matches the recommendation exactly. Set a COO "
+                   "Adjusted Plan Base in the table below and it will show up here.")
+    else:
+        names = {s["code"]: s["name"] for s in STORES}
+        delta_df = pd.DataFrame([
+            {"Store": f"{c} — {names.get(c, c)}", "Variance": d,
+             "Direction": "Above recommended" if d > 0 else "Below recommended"}
+            for c, d in deltas
+        ])
+        # Diverging by SIGN, never by size: the bar length already carries magnitude, and
+        # a value-ramp over store names would colour nominal categories by rank.
+        bars = alt.Chart(delta_df).mark_bar(cornerRadius=3).encode(
+            x=alt.X("Variance", title="COO Adjusted minus Recommended ($)"),
+            # Vega truncates axis labels at 180px by default, which cropped
+            # "LEAD - ADC - Leawood" to "LEAD - ADC - Lea...". Store names are the
+            # identity here, so they get the room to be read.
+            y=alt.Y("Store", sort=[r["Store"] for r in delta_df.to_dict("records")],
+                    title=None, axis=alt.Axis(labelLimit=280)),
+            color=alt.Color(
+                "Direction:N", title=None,
+                scale=alt.Scale(domain=["Above recommended", "Below recommended"],
+                                range=[PAL["above"], PAL["below"]]),
+            ),
+            tooltip=["Store", "Variance", "Direction"],
+        # 34px a row plus room for the axis band and legend. At 22px the two-bar case put
+        # the store labels almost on top of each other, and a height that excludes the
+        # axis band is what gives a chart its own tiny scrollbar.
+        ).properties(height=min(700, 34 * len(delta_df) + 70))
+        st.altair_chart(bars, use_container_width=True)
+        net = sum(d for _, d in deltas)
+        st.caption(
+            f"{len(deltas)} of {len(STORES)} stores overridden, biggest move first. "
+            f"Net effect on the network plan: **{'+' if net >= 0 else '−'}"
+            f"\\${abs(net):,.0f}**. Every number here is also in the Stores table below."
+        )
 
 # --- per-store --------------------------------------------------------------------------
 st.subheader("Stores")
@@ -399,16 +493,14 @@ st.caption("Set a COO Adjusted Plan Base to override a store. Leave blank to acc
 # against the raw forecast made every store show a difference it had not been given -- 65
 # rows reading "COO Adjusted: None" beside a non-zero variance, which is just the growth
 # rate wearing the wrong label. These three columns are Plan_Inputs E, F and G.
-_recommended_of = {s["code"]: forecasted.get(s["code"], 0.0) * (1.0 + ss.growth_rate)
-                   for s in STORES}
 edited = st.data_editor(
     [{"Code": s["code"], "Store": s["name"], "Region": s["region"],
       "Location Type": "Outlet" if s["code"] in OUTLET_CODES else "Store",
       "Status": s["status"],
       "Forecasted": round(forecasted.get(s["code"], 0.0), 2),
-      "Recommended": round(_recommended_of[s["code"]], 2),
+      "Recommended": round(recommended_of.get(s["code"], 0.0), 2),
       "COO Adjusted": ss.overrides.get(s["code"]),
-      "Variance": round(effective.get(s["code"], 0.0) - _recommended_of[s["code"]], 2)}
+      "Variance": round(effective.get(s["code"], 0.0) - recommended_of.get(s["code"], 0.0), 2)}
      for s in STORES],
     hide_index=True, use_container_width=True, height=380,
     disabled=["Code", "Store", "Region", "Location Type", "Status", "Forecasted",

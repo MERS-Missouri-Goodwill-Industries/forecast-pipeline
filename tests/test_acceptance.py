@@ -661,6 +661,60 @@ def test_the_screen_and_the_file_apply_growth_the_same_way():
     assert abs(float(s[f"F{15}"].value) - 9_999_999.0) < 0.01, "growth marked up an override"
 
 
+def test_the_monthly_chart_does_not_draw_one_shape_twice():
+    """The page used to plot "Recommended Plan" and "COO Adjusted Plan" as two monthly
+    lines. Both came from build_store_plan(total, days) with the same `days`, so they were
+    exactly proportional -- the same curve at two scales, a constant ratio apart -- and
+    neither carried any per-store or per-day information, so nothing the COO changed
+    store-side could move them. This proves the redundancy rather than trusting the memory
+    of it, and pins the chart to one series.
+    """
+    days = build_day_factors(YEAR, WEIGHTS, HOLIDAYS)
+    a = build_store_plan(100_000_000, days)["monthly"]
+    b = build_store_plan(157_500_000, days)["monthly"]
+    ratios = [y / x for x, y in zip(a, b)]
+    assert max(ratios) - min(ratios) < 1e-12, (
+        "the two series are NOT proportional any more -- if the monthly split has become "
+        "store-aware, a two-series comparison chart is worth reconsidering"
+    )
+
+    src = (ROOT / "app.py").read_text(encoding="utf-8")
+    assert '"Series": ["Recommended Plan"] * 12 + ["COO Adjusted Plan"] * 12' not in src, (
+        "the proportional two-line chart is back"
+    )
+    # Exactly one monthly series is extracted. Counting `build_store_plan(` would count
+    # the comment that explains why -- prose is not a call site.
+    n = src.count('["monthly"]')
+    assert n == 1, f"expected one monthly series, found {n} monthly extractions in app.py"
+
+    # What replaced it: per-store deltas, which DO carry store-level information, coloured
+    # by sign from a fixed two-pole domain. A domain fixed in code is what keeps a filtered
+    # chart from repainting its survivors.
+    assert "COO Adjusted minus Recommended" in src, "the per-store variance chart is missing"
+    assert 'domain=["Above recommended", "Below recommended"]' in src, (
+        "the diverging scale must pin its domain, not infer it from the rows present"
+    )
+
+
+def test_chart_hues_are_validated_and_theme_independent():
+    """Every mark colour has to clear 3:1 on BOTH surfaces, because the app pins no theme
+    base -- the reader picks. A hue chosen against white only is unreadable for half the
+    audience, which is how white-on-amber at 1.21:1 shipped once already."""
+    import app as _app
+
+    for surface in ("#ffffff", "#0e1117"):
+        for role in ("plan", "above", "below"):
+            ratio = _contrast(_app.PAL[role], surface)
+            assert ratio >= 3.0, f"{role} is {ratio:.2f}:1 on {surface}, below the 3:1 floor"
+
+    # Diverging poles must read as opposite -- warm against cool. Two cool hues give a
+    # midpoint that does not read as "nothing".
+    assert _app.PAL["above"] != _app.PAL["below"], "the diverging poles are the same colour"
+    r_above = int(_app.PAL["above"][1:3], 16)
+    r_below = int(_app.PAL["below"][1:3], 16)
+    assert r_below > r_above, "the 'below' pole should be the warm one"
+
+
 def test_exec_summary_shows_both_numbers_and_the_variance():
     wb = _wb(STORES[:3])
     s = wb[EXEC_CAL_SHEET_NAME]
