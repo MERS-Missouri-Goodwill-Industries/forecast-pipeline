@@ -18,7 +18,9 @@ from forecast_engine import (
     default_holidays, load_seed, normalize_weights, rounded_weights, weekday_counts,
     weekday_mix,
 )
-from workbook import workbook_bytes
+from workbook import (
+    DEFAULT_GROWTH_RATE, DEFAULT_STORE_GROWTH, grown_forecast, workbook_bytes,
+)
 
 MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
               "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
@@ -82,7 +84,10 @@ def _init():
     ss.setdefault("recommended_plan", 150_000_000.0)
     # The model forecasts no growth -- it cannot tell a promotion from a real expansion, so
     # it reads all growth as one-off seasonality. This is where the year's stretch is stated.
-    ss.setdefault("growth_rate", 0.05)
+    ss.setdefault("growth_rate", DEFAULT_GROWTH_RATE)
+    # Per-store growth, held as DEVIATIONS from the 1% default only. A store absent from this
+    # dict is at the default, so changing the default later cannot strand 65 stale copies.
+    ss.setdefault("store_growth", {})
     ss.setdefault("overrides", {})
     ss.setdefault("db_forecasts", {})
     ss.setdefault("run_status", None)
@@ -201,7 +206,28 @@ forecasted = {**algorithmic, **ss.db_forecasts}
 # typed; every other store carries the forecast grown by the rate. If this screen applied
 # growth differently from the workbook, the download would disagree with the page that
 # produced it -- store by store, with nothing flagging it.
-recommended_of = {c: forecasted.get(c, 0.0) * (1.0 + ss.growth_rate) for c in forecasted}
+def store_rate(code: str) -> float:
+    return ss.store_growth.get(code, DEFAULT_STORE_GROWTH)
+
+
+def read_store_growth(rows) -> dict[str, float]:
+    """Per-store rates out of the edited Stores table, as DEVIATIONS from the default.
+
+    A blank cell reads as the default, so "delete the number" and "put 1 back" land in the
+    same place. Only stores that differ from the default are kept, so a store that is back
+    on 1% leaves no entry behind to go stale.
+    """
+    out = {}
+    for r in rows:
+        pct = r["Growth (%)"]
+        rate = DEFAULT_STORE_GROWTH if pd.isna(pct) else float(pct) / 100.0
+        if abs(rate - DEFAULT_STORE_GROWTH) > 1e-9:
+            out[r["Code"]] = rate
+    return out
+
+
+recommended_of = {c: grown_forecast(forecasted.get(c, 0.0), store_rate(c), ss.growth_rate)
+                  for c in forecasted}
 effective = {c: ss.overrides[c] if c in ss.overrides else recommended_of[c]
              for c in forecasted}
 coo_total = sum(effective.values())
@@ -230,6 +256,7 @@ with st.container(key="export_build"):
                 year=YEAR, stores=STORES, weights=ss.weights, holidays=holidays,
                 recommended_plan=ss.recommended_plan,
                 growth_rate=ss.growth_rate,
+                store_growth={s["code"]: store_rate(s["code"]) for s in STORES},
                 recommended_bases=dict(ss.db_forecasts) or None,
                 day_pct_by_store=(dict(ss.day_pct_forecast)
                                   if ss.use_model_day_mix and ss.day_pct_forecast else None),
@@ -302,10 +329,11 @@ with c1:
         st.caption("Typed in. Run Forecast to set this from the model instead.")
 
     growth_pct = st.number_input(
-        "Growth rate above forecast (%)", min_value=-50.0, max_value=100.0,
+        "Growth rate, all stores (%)", min_value=-50.0, max_value=100.0,
         value=float(ss.growth_rate * 100), step=0.5, format="%.2f",
-        help=("The forecast assumes no growth. This is the stretch on top of it, and it "
-              "lands in the workbook as Plan_Inputs B9 where it can be changed again."),
+        help=("Applied to every store on top of its own growth rate, which you set per store "
+              "in the Stores table. The two compound. Lands in the workbook as Plan_Inputs "
+              "B9, where it can be changed again."),
     )
     if abs(growth_pct / 100.0 - ss.growth_rate) > 1e-9:
         ss.growth_rate = growth_pct / 100.0
@@ -313,8 +341,10 @@ with c1:
     # Escaped dollar signs: Streamlit reads a $...$ pair as LaTeX, so three of them in one
     # caption swallowed the middle number and rendered "150,000,000+5.00157,500,000".
     _fc_total = sum(forecasted.values())
-    st.caption(f"Forecast \\${_fc_total:,.0f} "
-               f"+ {ss.growth_rate * 100:.2f}% = **\\${_fc_total * (1 + ss.growth_rate):,.0f}** "
+    _rec_total = sum(recommended_of.values())
+    st.caption(f"Forecast \\${_fc_total:,.0f} \u2192 **\\${_rec_total:,.0f}** Recommended, "
+               f"after each store's own growth rate (Stores table, default "
+               f"{DEFAULT_STORE_GROWTH * 100:.0f}%) and {ss.growth_rate * 100:.2f}% on top, "
                "before any store override.")
 
     st.subheader("COO Adjusted Plan")
@@ -487,8 +517,9 @@ with c2:
 
 # --- per-store --------------------------------------------------------------------------
 st.subheader("Stores")
-st.caption("Set a COO Adjusted Plan Base to override a store. Leave blank to accept the "
-           "Recommended number, which is the forecast plus the growth rate.")
+st.caption("Two things you can set per store. **Growth (%)** changes that store's "
+           "Recommended number (default 1%). **COO Adjusted** overrides the number outright "
+           "-- leave it blank to accept Recommended.")
 # Forecasted and Recommended are separate columns on purpose. Measuring the variance
 # against the raw forecast made every store show a difference it had not been given -- 65
 # rows reading "COO Adjusted: None" beside a non-zero variance, which is just the growth
@@ -498,6 +529,7 @@ edited = st.data_editor(
       "Location Type": "Outlet" if s["code"] in OUTLET_CODES else "Store",
       "Status": s["status"],
       "Forecasted": round(forecasted.get(s["code"], 0.0), 2),
+      "Growth (%)": round(store_rate(s["code"]) * 100, 4),
       "Recommended": round(recommended_of.get(s["code"], 0.0), 2),
       "COO Adjusted": ss.overrides.get(s["code"]),
       "Variance": round(effective.get(s["code"], 0.0) - recommended_of.get(s["code"], 0.0), 2)}
@@ -508,8 +540,14 @@ edited = st.data_editor(
     column_config={
         "Forecasted": st.column_config.NumberColumn(
             format="$%.0f", help="The model's number, with no growth assumed."),
+        "Growth (%)": st.column_config.NumberColumn(
+            format="%.2f", step=0.25, min_value=-50.0, max_value=100.0,
+            help=("This store's own growth rate, on top of the all-stores rate. Starts at "
+                  "1%; type 1 to put a store back on the default. Plan_Inputs column K.")),
         "Recommended": st.column_config.NumberColumn(
-            format="$%.0f", help="Forecast plus the growth rate. Plan_Inputs column E."),
+            format="$%.0f",
+            help="Forecast grown by this store's rate and the all-stores rate. "
+                 "Plan_Inputs column E."),
         "COO Adjusted": st.column_config.NumberColumn(
             format="$%.0f", help="Your override. Leave blank to accept Recommended."),
         "Variance": st.column_config.NumberColumn(
@@ -517,6 +555,17 @@ edited = st.data_editor(
     },
 )
 new_over = {r["Code"]: float(r["COO Adjusted"]) for r in edited if pd.notna(r["COO Adjusted"])}
-if new_over != ss.overrides:
+
+# Compared by tolerance: the widget round-trips x -> x*100 -> /100 and can land one ULP
+# away, which an exact != would read as an edit and rerun forever.
+new_growth = read_store_growth(edited)
+
+
+def _same_growth(a: dict, b: dict) -> bool:
+    return a.keys() == b.keys() and all(abs(a[k] - b[k]) <= 1e-9 for k in a)
+
+
+if new_over != ss.overrides or not _same_growth(new_growth, ss.store_growth):
     ss.overrides = new_over
+    ss.store_growth = new_growth
     st.rerun()

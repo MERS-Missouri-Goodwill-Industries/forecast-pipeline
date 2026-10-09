@@ -46,6 +46,26 @@ MONEY = "$#,##0"
 MONEY2 = "$#,##0.00"
 PCT2 = "0.00%"
 PCT4 = "0.0000%"
+
+# Two growth levers, deliberately split. The per-store rate (Plan_Inputs column K) is where
+# each store's own expectation lives and starts at 1%; the all-stores rate (B9) is the
+# network-wide overlay and starts at 0% so it is a lever the COO reaches for, not a number
+# already silently inside every store.
+DEFAULT_STORE_GROWTH = 0.01
+DEFAULT_GROWTH_RATE = 0.0
+
+
+def grown_forecast(forecast: float, store_rate: float, network_rate: float) -> float:
+    """The Recommended number for one store: its forecast grown by its own rate and then by
+    the all-stores rate. The two compound, which is exactly what Plan_Inputs column E does:
+
+        =J*$B$4*(1+$B$9)*(1+K)
+
+    app.py calls this too. The screen and the file are two renderings of one rule, and this
+    project has already shipped the version where they were two implementations that
+    disagreed store by store -- so there is one function, not two copies of a formula.
+    """
+    return forecast * (1.0 + store_rate) * (1.0 + network_rate)
 # Variance formats put negatives in parentheses rather than [Red], which would be red text
 # on a white cell.
 MONEY_VAR = "$#,##0;($#,##0)"
@@ -300,7 +320,9 @@ def build_workbook(
     weights: dict[str, float],
     holidays: list[dict],
     recommended_plan: float,
-    growth_rate: float = 0.05,
+    growth_rate: float = DEFAULT_GROWTH_RATE,
+    store_growth: dict[str, float] | None = None,
+    default_store_growth: float = DEFAULT_STORE_GROWTH,
     recommended_bases: dict[str, float] | None = None,
     day_pct_by_store: dict[str, dict[str, float]] | None = None,
     store_overrides: dict[str, dict] | None = None,
@@ -330,18 +352,25 @@ def build_workbook(
     supplied = recommended_bases or {}
     forecasted = {st["code"]: supplied.get(st["code"], split[st["code"]]) for st in stores}
 
-    # The COO track starts equal to the Recommended track, and Recommended now carries the
-    # growth rate, so the seed has to carry it too. Seeding from the ungrown forecast would
-    # open the workbook already showing a variance the COO never created -- at 5% growth on
-    # a $148M forecast that is a $7.4M shortfall on the first screen.
+    # Each store's rate: its own entry if the COO gave one, else the default. Resolved once
+    # here so the seeded COO numbers, the Recommended formulas and the column K inputs can
+    # never disagree about what a store's rate is.
+    supplied_growth = store_growth or {}
+    rate_of = {st["code"]: float(supplied_growth.get(st["code"], default_store_growth))
+               for st in stores}
+
+    # The COO track starts equal to the Recommended track, and Recommended carries BOTH
+    # growth rates, so the seed has to carry both. Seeding from the ungrown forecast would
+    # open the workbook already showing a variance the COO never created.
     #
     # An explicit override is the COO's own number and is taken as stated: growth is a
     # default for stores nobody has ruled on, not a markup applied over a decision.
     planned_sales: dict[str, float] = {}
     for st in stores:
         override_base = overrides.get(st["code"], {}).get("plan_base")
-        planned_sales[st["code"]] = (forecasted[st["code"]] * (1.0 + growth_rate)
-                                     if override_base is None else override_base)
+        planned_sales[st["code"]] = (
+            grown_forecast(forecasted[st["code"]], rate_of[st["code"]], growth_rate)
+            if override_base is None else override_base)
 
     validation_results = validate_plan(stores, planned_sales, days, overrides)
     hard_errors = [r for r in validation_results if r["status"] == "ERROR"]
@@ -364,7 +393,7 @@ def build_workbook(
     _day_factors(wb, days, df_last)
     _plan_inputs(wb, stores, forecasted, planned_sales, store_start, store_end,
                  forecast_codes={st["code"] for st in stores if st["code"] in supplied},
-                 growth_rate=growth_rate)
+                 growth_rate=growth_rate, store_rates=rate_of)
 
     # Per-store day shares are opt-in. Without them every store keeps the single flat
     # weekday curve, which is what Criterion 7 guarantees; with them a store carries its
@@ -408,10 +437,12 @@ def _how_to_use(wb: Workbook, session_name: str, author: str) -> None:
          "typed. Plan_Inputs B7 then tells you whether the store-by-store plans still add up "
          "to it. (Exec Calendar Inputs only displays the total; it is calculated there.)"),
         ("2. Growth rate factor",
-         "Plan_Inputs cell B9. The forecast assumes no growth — it cannot tell a promotion "
-         "from a real expansion, so it carries none forward. This is where you say how much "
-         "growth the year is meant to carry, and it moves every store's Recommended number "
-         "at once. Your COO Adjusted numbers stay put; the variance column shows the gap."),
+         "Two places, and they compound. Plan_Inputs column K is each store's own growth %, "
+         "starting at 1% — change one store without touching the rest. Plan_Inputs cell B9 "
+         "is the all-stores rate, starting at 0%, applied on top. The forecast assumes no "
+         "growth — it cannot tell a promotion from a real expansion — so this is where you "
+         "say how much the year should carry. Your COO Adjusted numbers stay put; the "
+         "variance column shows the gap."),
         ("3. Any individual store",
          "Plan_Inputs column F sets a store's annual number. Or open that store's own tab and "
          "edit the COO Adjusted Plan column (D) day by day — clear cells to take days out."),
@@ -596,25 +627,28 @@ def _day_factors(wb: Workbook, days: list[dict], df_last: int) -> None:
 # --- Plan_Inputs -----------------------------------------------------------------------
 def _plan_inputs(wb: Workbook, stores: list[dict], recommended: dict[str, float],
                  planned_sales: dict[str, float], start: int, end: int,
-                 forecast_codes: set[str] | None = None, growth_rate: float = 0.05) -> None:
+                 forecast_codes: set[str] | None = None,
+                 growth_rate: float = DEFAULT_GROWTH_RATE,
+                 store_rates: dict[str, float] | None = None) -> None:
     """Two money columns per store: the Recommended baseline (locked) and the COO Adjusted
     plan (editable), with the variance between them.
 
-    Four cells are editable in the whole workbook and two of them are here. B5 is the COO's
-    own top-line number; B9 is the growth rate the plan carries above the model's forecast.
+    B5 is the COO's own top-line number. Growth is stated on purpose in two places, because
+    the model cannot pull this lever for itself -- it sees a promotion and a real expansion
+    as the same bump, so left alone it treats all growth as one-off seasonality and forecasts
+    none going forward:
 
-    The growth rate is the lever the model cannot pull for itself. It sees a promotion and a
-    real expansion as the same bump, so left alone it treats all growth as one-off
-    seasonality and forecasts none going forward. B9 is where that is stated on purpose:
+        K   Store Growth %       typed, one per store, starts at 1%
+        B9  Growth Rate          typed, applies to every store, starts at 0%
+        E   per store            = its share of the forecast * (1 + B9) * (1 + K)
+        B8  Planned Sales Total  = SUM(E)
 
-        B4  Forecasted Total          the model's number, a constant
-        B9  Growth Rate               typed
-        B8  Planned Sales Total       = B4 * (1 + B9)
-        E   per store                 = its share of the forecast * B8
+    The two compound, so a store at 3% under a 2% network rate carries 5.06%, not 5%. B9 is
+    the all-stores overlay and K is each store's own expectation; typing in either moves the
+    Recommended column and nothing else.
 
-    so moving B9 moves all 65 stores' recommendations at once and nothing else has to be
-    touched. B4 is a constant rather than =SUM(E) precisely because E depends on it -- the
-    formula version is a circular reference.
+    B4 is a constant rather than =SUM(E) because E is priced off it -- the formula version
+    is a circular reference. B8 CAN be =SUM(E) because E no longer reads B8.
 
     What actually drives every store tab is the per-store COO Adjusted column, so B7 reports
     whether the store-by-store allocation still adds up to the top line in B5. Deriving the
@@ -624,16 +658,17 @@ def _plan_inputs(wb: Workbook, stores: list[dict], recommended: dict[str, float]
     s = wb.create_sheet("Plan_Inputs")
     s.column_dimensions["A"].width = 30
     s.column_dimensions["B"].width = 34
-    for c in range(3, 11):
+    for c in range(3, 12):
         s.column_dimensions[get_column_letter(c)].width = 24
 
     _hdr(s["A1"], 14).value = "Plan Inputs — Recommended vs COO Adjusted"
     _note(s["A2"]).value = (
-        "Yellow cells with blue text are yours to change, and on this sheet there are three: "
-        "the COO Adjusted Total in B5, the Growth Rate in B9, and the COO Adjusted Planned "
-        "Sales column for each store. Grey cells are calculated -- the Recommended column is "
-        "the forecast grown by B9 and is deliberately left alone so you always keep the "
-        "before-and-after comparison."
+        "Yellow cells with blue text are yours to change, and on this sheet there are four "
+        "kinds: the COO Adjusted Total in B5, the all-stores Growth Rate in B9, each store's "
+        "own Store Growth % in column K, and the COO Adjusted Planned Sales column for each "
+        "store. Grey cells are calculated -- the Recommended column is the forecast grown by "
+        "both rates and is deliberately left alone so you always keep the before-and-after "
+        "comparison."
     )
 
     # Where Recommended came from changes what the Recommended Total means, so say it on the
@@ -674,13 +709,16 @@ def _plan_inputs(wb: Workbook, stores: list[dict], recommended: dict[str, float]
     )
 
     _hdr(s["A8"]).value = "Planned Sales Total"
-    _locked(s["B8"], MONEY2).value = "=B4*(1+B9)"
-    _note(s["C8"]).value = "Forecast plus growth. This is what column E splits across the stores."
-    _hdr(s["A9"]).value = "Growth Rate Above Forecast"
+    _locked(s["B8"], MONEY2).value = f"=SUM($E${start}:$E${end})"
+    _note(s["C8"]).value = ("The forecast after both growth rates -- the sum of column E. "
+                            "This is the Recommended total your COO Adjusted plan is "
+                            "measured against.")
+    _hdr(s["A9"]).value = "Growth Rate (All Stores)"
     _inp(s["B9"], PCT2).value = float(growth_rate)
     _note(s["C9"]).value = (
-        "Type a percent. It moves every store's Recommended number at once -- it does NOT "
-        "move your COO Adjusted column, so column G shows you the gap it opens."
+        "Type a percent. It applies to every store on top of that store's own Store Growth % "
+        "in column K, and compounds with it. It moves the Recommended column, NOT your COO "
+        "Adjusted column, so column G shows you the gap it opens."
     )
 
     _hdr(s["A10"]).value = "Variance vs Recommended ($)"
@@ -705,11 +743,20 @@ def _plan_inputs(wb: Workbook, stores: list[dict], recommended: dict[str, float]
             mult[-1] = round(1.0 - sum(mult[:-1]), 12)
     share_of = dict(zip(codes, mult))
 
+    rates = store_rates or {}
+
     header_row = start - 1
     for i, h in enumerate(["Code", "Name", "Region", "Status", "Recommended Planned Sales",
                            "COO Adjusted Planned Sales", "Variance ($)", "Variance (%)",
-                           "% of Agency", "Multiplier"]):
+                           "% of Agency", "Multiplier", "Store Growth %"]):
         _hdr(s.cell(header_row, i + 1)).value = h
+    s.cell(header_row, 11).comment = Comment(
+        "This store's own growth rate -- the lever for 'this store will grow more (or less) "
+        "than the rest'. Starts at 1%. Applied on top of the all-stores Growth Rate in B9 and "
+        "compounded with it. Moves this store's Recommended number only; your COO Adjusted "
+        "figure stays put, so the variance shows the gap.",
+        "workbook.py",
+    )
     s.cell(header_row, 9).comment = Comment(
         "This store's share of the COO Adjusted Total -- what it actually carries once you "
         "have finished editing. Not the same as Multiplier, which is its share of the "
@@ -718,15 +765,15 @@ def _plan_inputs(wb: Workbook, stores: list[dict], recommended: dict[str, float]
     )
     s.cell(header_row, 10).comment = Comment(
         "Share of the model forecast, summing to exactly 1 across all stores. Column E is "
-        "this times the Planned Sales Total in B8, which is how the growth rate in B9 "
-        "reaches every store at once.",
+        "this times the forecast total in B4. It is what lets one all-stores rate in B9 reach "
+        "every store at once.",
         "workbook.py",
     )
     s.cell(header_row, 5).comment = Comment(
-        "This store's share of the Planned Sales Total in B8 -- the model forecast (new "
-        "stores inherit the average of up to three same-region comparables; closed stores "
-        "start at $0) grown by the rate in B9. A formula, not a typed number: change B9 and "
-        "every row here moves together. Left unchanged so the variance stays meaningful.",
+        "This store's model forecast (new stores inherit the average of up to three "
+        "same-region comparables; closed stores start at $0) grown by the all-stores rate "
+        "in B9 and by its own rate in column K. A formula, not a typed number: change either "
+        "rate and the row moves. Left unchanged so the variance stays meaningful.",
         "workbook.py",
     )
     s.cell(header_row, 6).comment = Comment(
@@ -741,12 +788,13 @@ def _plan_inputs(wb: Workbook, stores: list[dict], recommended: dict[str, float]
         _fml(s[f"B{r}"]).value = st["name"]
         _fml(s[f"C{r}"]).value = st["region"]
         _fml(s[f"D{r}"]).value = st["status"]
-        _locked(s[f"E{r}"], MONEY2).value = f"=J{r}*$B$8"
+        _locked(s[f"E{r}"], MONEY2).value = f"=J{r}*$B$4*(1+$B$9)*(1+K{r})"
         _inp(s[f"F{r}"], MONEY).value = round(planned_sales[st["code"]], 2)
         _locked(s[f"G{r}"], MONEY_VAR).value = f"=F{r}-E{r}"
         _locked(s[f"H{r}"], PCT_VAR).value = f"=IF(E{r}=0,0,G{r}/E{r})"
         _locked(s[f"I{r}"], PCT2).value = f"=IF($B$6=0,0,F{r}/$B$6)"
         _locked(s[f"J{r}"], PCT4).value = share_of[st["code"]]
+        _inp(s[f"K{r}"], PCT2).value = float(rates.get(st["code"], DEFAULT_STORE_GROWTH))
 
     tr = end + 1
     _hdr(s[f"A{tr}"]).value = "TOTAL"
@@ -758,6 +806,12 @@ def _plan_inputs(wb: Workbook, stores: list[dict], recommended: dict[str, float]
     # Reads 100.00% only if the shares really do sum to 1. A column that silently totals
     # 97% is a network plan quietly missing 3% of itself, with nothing on screen to say so.
     _locked(s[f"J{tr}"], PCT4).value = f"=SUM(J{start}:J{end})"
+    # The network's effective store-level rate, weighted by each store's share of the
+    # forecast -- a plain average would let a tiny outlet count as much as the biggest store.
+    _locked(s[f"K{tr}"], PCT2).value = (
+        f"=IF(SUM(J{start}:J{end})=0,0,SUMPRODUCT(J{start}:J{end},K{start}:K{end})"
+        f"/SUM(J{start}:J{end}))"
+    )
 
 
 # --- store tab -------------------------------------------------------------------------
