@@ -19,8 +19,7 @@ from forecast_engine import (
     weekday_mix,
 )
 from workbook import (
-    DEFAULT_GROWTH_RATE, DEFAULT_STORE_GROWTH, borrow_day_shapes, grown_forecast,
-    workbook_bytes,
+    DEFAULT_GROWTH_RATE, DEFAULT_STORE_GROWTH, grown_forecast, workbook_bytes,
 )
 
 MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
@@ -194,20 +193,6 @@ if ss.day_pct_status:
         if ss.use_model_day_mix:
             st.caption("Store tabs carry their own day shares (column AE). The weekday "
                        "weights below no longer drive the daily split while this is on.")
-            # The same function the workbook calls, so this list is exactly the set of
-            # stores whose tab says "Borrowed" -- not a second opinion about who qualifies.
-            _, _borrowed = borrow_day_shapes(
-                STORES, dict(ss.day_pct_forecast),
-                [d["date"] for d in build_day_factors(YEAR, ss.weights, default_holidays(YEAR))])
-            if _borrowed:
-                _desc = ", ".join(
-                    f"{c} ({'all year' if i['whole'] else str(i['days']) + ' days'})"
-                    for c, i in sorted(_borrowed.items()))
-                st.caption(
-                    "The model repeats one value day after day for " + _desc + ", which "
-                    "would price those days identically. Those days take a shape averaged "
-                    "from up to three same-region comparables, keeping the share of the "
-                    "year the model gave them. The rest of each store is the model's own.")
         else:
             st.caption("Weekday weights are driving the daily split. The model day mix is "
                        "loaded and ready if you want it.")

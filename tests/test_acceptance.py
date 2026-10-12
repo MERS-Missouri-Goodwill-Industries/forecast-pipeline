@@ -29,7 +29,7 @@ from forecast_engine import (  # noqa: E402
     default_holidays, expand_closures, load_seed, month_row_ranges, weekday_mix,
 )
 from workbook import (  # noqa: E402
-    DEFAULT_GROWTH_RATE, DEFAULT_STORE_GROWTH, MIN_FLAT_RUN, borrow_day_shapes,
+    DEFAULT_GROWTH_RATE, DEFAULT_STORE_GROWTH, MIN_FLAT_RUN, _cents, borrow_day_shapes,
     flat_stretches, grown_forecast,
     build_workbook, tab_name, validate_plan, EXEC_CAL_SHEET_NAME, CAL_OFFSET,
     mm_coo_first_row, mm_coo_network_row, mm_rec_first_row, mm_rec_network_row,
@@ -229,10 +229,10 @@ def _recommended(s, row):
     the all-stores rate in B9 and by its own rate in K. openpyxl never evaluates a formula,
     so reproduce the arithmetic and assert the shape while we are here -- a test that
     silently stopped resolving the real formula would pass on anything."""
-    expected = f"=J{row}*$B$4*(1+$B$9)*(1+K{row})"
+    expected = f"=ROUND(J{row}*$B$4*(1+$B$9)*(1+K{row}),2)"
     assert s[f"E{row}"].value == expected, s[f"E{row}"].value
-    return (float(s[f"J{row}"].value) * float(s["B4"].value)
-            * (1.0 + float(s["B9"].value)) * (1.0 + float(s[f"K{row}"].value)))
+    return _cents(float(s[f"J{row}"].value) * float(s["B4"].value)
+                  * (1.0 + float(s["B9"].value)) * (1.0 + float(s[f"K{row}"].value)))
 
 
 def _forecast_of(s, row):
@@ -486,7 +486,7 @@ def test_plan_inputs_carries_both_tracks_and_an_editable_total():
 
     for i in range(3):
         r = start + i
-        assert s[f"E{r}"].value == f"=J{r}*$B$4*(1+$B$9)*(1+K{r})", "Recommended follows both rates"
+        assert s[f"E{r}"].value == f"=ROUND(J{r}*$B$4*(1+$B$9)*(1+K{r}),2)", "Recommended follows both rates"
         assert isinstance(s[f"K{r}"].value, (int, float)), "each store's rate is typed, not derived"
         assert "$B$8" not in str(s[f"E{r}"].value), (
             "column E must not read B8: B8 is =SUM(E), so that would be a circular reference"
@@ -672,7 +672,8 @@ def test_the_growth_rate_reaches_every_store_and_the_shares_total_one():
             assert abs(resolved[i] - expected) < 0.01, (
                 f"{st['code']} at growth {growth}: {resolved[i]:,.2f} != {expected:,.2f}"
             )
-        assert abs(sum(resolved) - total_forecast * (1 + DEFAULT_STORE_GROWTH) * (1 + growth)) < 0.01
+        assert abs(sum(resolved) - total_forecast * (1 + DEFAULT_STORE_GROWTH) * (1 + growth)) \
+            <= 0.005 * len(stores) + 1e-6
 
     # 2. The balance check must compare the store rows against the TYPED total in B5.
     #    B6 and B7 holding the same formula is what made it always read zero.
@@ -724,7 +725,11 @@ def test_the_screen_and_the_file_apply_growth_the_same_way():
         assert abs(file_value - screen[st["code"]]) < 0.01, (
             f"{st['code']}: screen {screen[st['code']]:,.2f} != file {file_value:,.2f}"
         )
-    assert abs(float(s["B5"].value) - sum(screen.values())) < 0.01, "top line disagrees"
+    # Each store is rounded to the cent in the file and not on the screen, so the totals may
+    # differ by up to half a cent per store.
+    assert abs(float(s["B5"].value) - sum(screen.values())) <= 0.005 * len(stores) + 1e-6, (
+        "top line disagrees"
+    )
 
     # An override is a decision, not a baseline: growth must not be applied on top of it.
     assert abs(float(s[f"F{15}"].value) - 9_999_999.0) < 0.01, "growth marked up an override"
@@ -1128,6 +1133,64 @@ def test_a_partly_flat_store_is_reshaped_only_where_it_is_flat():
     assert dates[run_idx[0]] in sheet["AE8"].comment.text
 
 
+def _balance(sheet, n):
+    """B7 and B10 resolved the way Excel will, plus the per-store F-E gaps."""
+    start, end = 14, 14 + n - 1
+    f = [float(sheet[f"F{r}"].value) for r in range(start, end + 1)]
+    e = [_recommended(sheet, r) for r in range(start, end + 1)]
+    b5 = float(sheet["B5"].value)
+    return {"B7": sum(f) - b5, "B10": sum(f) - sum(e),
+            "worst_store": max(abs(a - b) for a, b in zip(f, e))}
+
+
+def test_the_workbook_opens_balanced_to_the_cent():
+    """The reported "Not balanced" on Plan_Inputs by a couple of cents.
+
+    Every store's COO number was rounded to the cent on its own, but the typed total in B5
+    was rounded from the UNROUNDED sum, so sixty-five stores' fractions of a cent surfaced as
+    a gap -- +$0.06 at the app's own defaults -- and the check, which tolerates under a cent,
+    called it unbalanced. Recommended (a formula) and COO Adjusted (a rounded constant) also
+    differed by up to half a cent a store: a variance nobody created.
+
+    Both are asserted here at the inputs that exposed it, including non-round forecasts like
+    the live table's.
+    """
+    # the app's own defaults: $150M split in proportion to base sales, 1% per store
+    cases = {
+        "app defaults": dict(),
+        "non-round forecasts": dict(recommended_bases={
+            st["code"]: 1_500_000.37 + 20_123.41 * i for i, st in enumerate(STORES)}),
+        "an override": dict(store_overrides={STORES[2]["code"]: {"plan_base": 987_654.321}}),
+    }
+    for label, kw in cases.items():
+        wb = build_workbook(year=YEAR, stores=STORES, weights=WEIGHTS, holidays=HOLIDAYS,
+                            recommended_plan=PLAN, **kw)
+        sheet = wb["Plan_Inputs"]
+        bal = _balance(sheet, len(STORES))
+        assert abs(bal["B7"]) < 0.005, f"{label}: B7 reads {bal['B7']:+.4f}, the sheet would say Not balanced"
+        if label != "an override":
+            assert abs(bal["B10"]) < 1e-6, f"{label}: B10 reads {bal['B10']:+.6f}, a variance nobody created"
+            assert bal["worst_store"] < 1e-6, f"{label}: a store opens with Recommended != COO Adjusted"
+        else:
+            # only the overridden store may differ from its Recommended
+            f = [float(sheet[f"F{14 + i}"].value) for i in range(len(STORES))]
+            e = [_recommended(sheet, 14 + i) for i in range(len(STORES))]
+            off = [STORES[i]["code"] for i in range(len(STORES)) if abs(f[i] - e[i]) > 1e-6]
+            assert off == [STORES[2]["code"]], off
+
+
+def test_cents_rounds_the_way_excel_does():
+    """Half away from zero, on what Excel sees rather than the raw binary float. Python's own
+    round() would give 2.67 for 2.675 and 0.12 for 0.125."""
+    assert _cents(2.675) == 2.68
+    assert _cents(1234.565) == 1234.57
+    assert _cents(1234.5649999999998) == 1234.57      # last-bit noise on a half-cent
+    assert _cents(0.125) == 0.13
+    assert _cents(-2.675) == -2.68
+    assert _cents(5.0) == 5.0 and _cents(0.0) == 0.0
+    assert _cents(1234.5649) == 1234.56
+
+
 def test_every_store_tab_shows_its_growth_rate():
     """Plan_Inputs column K and B9 are where a rate is typed; every store tab mirrors them so
     the number behind a store's Recommended is on the page that shows it."""
@@ -1159,10 +1222,10 @@ def _wb_input_font(wb):
     return wb["Plan_Inputs"]["B9"].font.color.rgb
 
 
-def test_the_apps_borrowed_list_matches_the_workbook_and_reaches_the_file():
-    """Through the real app: turn the model day mix on, check the page names the stores that
-    borrow a shape, click Build Workbook, and confirm those same tabs say so. One function
-    (borrow_day_shapes) decides, so the screen and the file cannot disagree."""
+def test_the_model_day_mix_chosen_in_the_app_reaches_the_file_reshaped():
+    """Through the real app: turn the model day mix on, click Build Workbook, and confirm the
+    new stores' tabs carry a varied, borrowed shape rather than the model's repeated value.
+    The fix lives in the workbook generator, so it holds whether or not the page says so."""
     import io as _io
 
     import openpyxl
@@ -1196,8 +1259,9 @@ def test_the_apps_borrowed_list_matches_the_workbook_and_reaches_the_file():
         at.run()
         assert not at.exception, at.exception
         captions = " ".join(c.value for c in at.caption)
-        for st in news:
-            assert st["code"] in captions, f"the page does not name {st['code']}: {captions[:300]}"
+        assert "repeats one value" not in captions, (
+            "the on-screen note about re-shaped stores was removed on request"
+        )
         buttons = [b for b in at.button if "Build Workbook" in (b.label or "")]
         buttons[0].click().run()
         assert not at.exception, at.exception

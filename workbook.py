@@ -68,6 +68,18 @@ def grown_forecast(forecast: float, store_rate: float, network_rate: float) -> f
     return forecast * (1.0 + store_rate) * (1.0 + network_rate)
 
 
+def _cents(x: float) -> float:
+    """Round to the cent the way Excel's ROUND does: half away from zero.
+
+    Python's round() is banker's rounding and works on the raw binary float, so the two can
+    disagree on a value that sits on a half-cent. The pre-round to nine places absorbs the
+    last-bit noise that makes 1234.565 arrive as 1234.5649999999998, which Excel reads as
+    1234.565 and rounds up.
+    """
+    from decimal import Decimal, ROUND_HALF_UP
+    return float(Decimal(repr(round(float(x), 9))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+
+
 # A real daily forecast cannot hold one value for two weeks: it moves with the weekday. A run
 # this long of identical consecutive open-day values is the model saying nothing, not
 # something about the store.
@@ -560,7 +572,8 @@ def build_workbook(
     _day_factors(wb, days, df_last)
     _plan_inputs(wb, stores, forecasted, planned_sales, store_start, store_end,
                  forecast_codes={st["code"] for st in stores if st["code"] in supplied},
-                 growth_rate=growth_rate, store_rates=rate_of)
+                 growth_rate=growth_rate, store_rates=rate_of,
+                 overridden={c for c, o in overrides.items() if o.get("plan_base") is not None})
 
     # Per-store day shares are opt-in. Without them every store keeps the single flat
     # weekday curve, which is what Criterion 7 guarantees; with them a store carries its
@@ -806,7 +819,8 @@ def _plan_inputs(wb: Workbook, stores: list[dict], recommended: dict[str, float]
                  planned_sales: dict[str, float], start: int, end: int,
                  forecast_codes: set[str] | None = None,
                  growth_rate: float = DEFAULT_GROWTH_RATE,
-                 store_rates: dict[str, float] | None = None) -> None:
+                 store_rates: dict[str, float] | None = None,
+                 overridden: set[str] | None = None) -> None:
     """Two money columns per store: the Recommended baseline (locked) and the COO Adjusted
     plan (editable), with the variance between them.
 
@@ -817,7 +831,7 @@ def _plan_inputs(wb: Workbook, stores: list[dict], recommended: dict[str, float]
 
         K   Store Growth %       typed, one per store, starts at 1%
         B9  Growth Rate          typed, applies to every store, starts at 0%
-        E   per store            = its share of the forecast * (1 + B9) * (1 + K)
+        E   per store            = ROUND(its share of the forecast * (1 + B9) * (1 + K), 2)
         B8  Planned Sales Total  = SUM(E)
 
     The two compound, so a store at 3% under a 2% network rate carries 5.06%, not 5%. B9 is
@@ -869,12 +883,13 @@ def _plan_inputs(wb: Workbook, stores: list[dict], recommended: dict[str, float]
 
     coo_total = f"=SUM($F${start}:$F${end})"
 
+    b4_value = round(sum(recommended.values()), 2)
     _hdr(s["A4"]).value = "Forecasted Total"
-    _locked(s["B4"], MONEY2).value = round(sum(recommended.values()), 2)
+    _locked(s["B4"], MONEY2).value = b4_value
     _note(s["C4"]).value = ("What the model predicts with no growth assumed. A constant, not "
                             "a sum of column E -- column E is priced off it.")
     _hdr(s["A5"]).value = "COO Adjusted Total"
-    _inp(s["B5"], MONEY).value = round(sum(planned_sales.values()), 2)
+    _inp(s["B5"], MONEY)          # value set below, once every store's F is known
     _note(s["C5"]).value = "Your top-line number. Type over it."
     _hdr(s["A6"]).value = "Sum of Store Plans"
     _locked(s["B6"], MONEY).value = coo_total
@@ -921,6 +936,21 @@ def _plan_inputs(wb: Workbook, stores: list[dict], recommended: dict[str, float]
     share_of = dict(zip(codes, mult))
 
     rates = store_rates or {}
+    pinned = overridden or set()
+
+    # Column E is rounded to the cent IN THE FORMULA, and each store's seeded COO number is
+    # computed from the very same inputs (the stored J and B4, both rates), so the two tracks
+    # open identical. Before this, F was a rounded constant against an unrounded formula, and
+    # B5 was rounded from the unrounded sum: sixty-five stores' worth of fractions of a cent
+    # surfaced as "Not balanced" by a few cents -- +$0.06 at the app's own defaults -- and a
+    # variance nobody created. An override is the COO's own number and is taken as typed.
+    seed_f = {
+        c: (_cents(planned_sales[c]) if c in pinned else
+            _cents(share_of[c] * b4_value * (1 + growth_rate)
+                   * (1 + rates.get(c, DEFAULT_STORE_GROWTH))))
+        for c in codes
+    }
+    s["B5"].value = round(sum(seed_f.values()), 2)
 
     header_row = start - 1
     for i, h in enumerate(["Code", "Name", "Region", "Status", "Recommended Planned Sales",
@@ -965,8 +995,8 @@ def _plan_inputs(wb: Workbook, stores: list[dict], recommended: dict[str, float]
         _fml(s[f"B{r}"]).value = st["name"]
         _fml(s[f"C{r}"]).value = st["region"]
         _fml(s[f"D{r}"]).value = st["status"]
-        _locked(s[f"E{r}"], MONEY2).value = f"=J{r}*$B$4*(1+$B$9)*(1+K{r})"
-        _inp(s[f"F{r}"], MONEY).value = round(planned_sales[st["code"]], 2)
+        _locked(s[f"E{r}"], MONEY2).value = f"=ROUND(J{r}*$B$4*(1+$B$9)*(1+K{r}),2)"
+        _inp(s[f"F{r}"], MONEY).value = seed_f[st["code"]]
         _locked(s[f"G{r}"], MONEY_VAR).value = f"=F{r}-E{r}"
         _locked(s[f"H{r}"], PCT_VAR).value = f"=IF(E{r}=0,0,G{r}/E{r})"
         _locked(s[f"I{r}"], PCT2).value = f"=IF($B$6=0,0,F{r}/$B$6)"
