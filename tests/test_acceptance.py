@@ -242,12 +242,50 @@ def _forecast_of(s, row):
 
 def test_workbook_shape():
     wb = _wb(STORES[:3])
-    expected = ["How_To_Use", "Exec Calendar Inputs", "Data_Validation", "All_Stores_Summary",
-                "Monthly_Matrix", "Daily_Disaggregated_Plan", "Final_Sales_Goals",
-                "Day_Factors", "Plan_Inputs"]
-    assert wb.sheetnames[:9] == expected
+    # Plan_Inputs leads; the daily feed and the day engine close, after every store tab.
+    head = ["Plan_Inputs", "How_To_Use", "Exec Calendar Inputs", "Data_Validation",
+            "All_Stores_Summary", "Monthly_Matrix", "Final_Sales_Goals"]
+    tail = ["Daily_Disaggregated_Plan", "Day_Factors"]
+    assert wb.sheetnames[:len(head)] == head
+    assert wb.sheetnames[-len(tail):] == tail
+    assert wb.sheetnames[len(head):-len(tail)] == [tab_name(st) for st in STORES[:3]], (
+        "the store tabs belong between the working sheets and the two closing ones"
+    )
     assert len(wb.sheetnames) == 9 + 3
     assert all(len(n) <= 31 for n in wb.sheetnames), "Excel caps sheet names at 31 chars"
+
+
+def _selected_tabs(data: bytes) -> list[str]:
+    """Names of the sheets the SAVED file flags as selected, read from the raw XML."""
+    import re
+    import zipfile
+    from io import BytesIO
+
+    z = zipfile.ZipFile(BytesIO(data))
+    book = z.read("xl/workbook.xml").decode("utf-8")
+    rels = z.read("xl/_rels/workbook.xml.rels").decode("utf-8")
+    target = {}
+    for m in re.finditer(r"<Relationship [^>]*>", rels):
+        tag = m.group(0)
+        rid = re.search(r'Id="([^"]+)"', tag).group(1)
+        target[rid] = re.search(r'Target="([^"]+)"', tag).group(1).lstrip("/")
+    out = []
+    for name, rid in re.findall(r'<sheet [^>]*name="([^"]+)"[^>]*r:id="([^"]+)"', book):
+        part = target[rid] if target[rid].startswith("xl/") else "xl/" + target[rid]
+        if re.search(r'tabSelected="(1|true)"', z.read(part).decode("utf-8")[:2000]):
+            out.append(name)
+    return out
+
+
+def test_exactly_one_tab_is_selected_after_the_reorder():
+    """Reordering sheets can leave two flagged as selected, and Excel then opens them as a
+    GROUP: whatever the COO types on one sheet lands on every sheet in the group. That would
+    quietly write over 65 store tabs, so it is asserted on the saved file, not the object."""
+    from workbook import workbook_bytes
+
+    data = workbook_bytes(year=YEAR, stores=STORES[:3], weights=WEIGHTS, holidays=HOLIDAYS,
+                          recommended_plan=PLAN)
+    assert _selected_tabs(data) == ["Plan_Inputs"], _selected_tabs(data)
 
 
 def test_validate_plan_clean_input_is_all_ok():

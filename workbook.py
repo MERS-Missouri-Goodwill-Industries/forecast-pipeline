@@ -457,6 +457,29 @@ def validate_plan(
     return results
 
 
+# Sheet order. The sheets a COO works in come first and the engine and the Power BI feed go
+# last, after every store tab. Everything is created and referenced BY NAME, so the order is
+# purely presentational: moving a sheet cannot change what any formula resolves to.
+SHEETS_FIRST = ["Plan_Inputs"]
+SHEETS_LAST = ["Daily_Disaggregated_Plan", "Day_Factors"]
+
+
+def _order_sheets(wb: Workbook) -> None:
+    for name in reversed(SHEETS_FIRST):
+        ws = wb[name]
+        wb.move_sheet(ws, offset=-wb.worksheets.index(ws))
+    for name in SHEETS_LAST:
+        ws = wb[name]
+        wb.move_sheet(ws, offset=len(wb.worksheets) - 1 - wb.worksheets.index(ws))
+
+    # Exactly one tab may be selected. A reorder can leave two flagged, and Excel then opens
+    # them as a GROUP: a keystroke typed on one sheet lands on every sheet in the group.
+    for ws in wb.worksheets:
+        ws.sheet_view.tabSelected = False
+    wb.active = 0
+    wb.worksheets[0].sheet_view.tabSelected = True
+
+
 def build_workbook(
     *,
     year: int,
@@ -556,6 +579,7 @@ def build_workbook(
     _monthly_matrix(wb, mm, stores)
     _daily_feed(wb, dd, stores, days)
     _final_sales_goals(wb, fg, stores, days)
+    _order_sheets(wb)
     return wb
 
 
@@ -646,6 +670,8 @@ def _how_to_use(wb: Workbook, session_name: str, author: str) -> None:
 
     _hdr(s["A29"]).value = "Sheet Index"
     index = [
+        ("Plan_Inputs", "The network total, the growth rates and, per store, Recommended vs "
+         "COO Adjusted with the variance. This is where you set a store's annual number."),
         ("Exec Calendar Inputs", "Recommended, COO Adjusted and the variance at the top, the "
          "month-by-month comparison below it, then your control centre for weekday weights, "
          "holidays and the Weekday Mix."),
@@ -655,13 +681,12 @@ def _how_to_use(wb: Workbook, session_name: str, author: str) -> None:
          "in dollars and percent."),
         ("Monthly_Matrix", "Two stacked grids -- COO Adjusted by store by month, then "
          "Recommended -- with a variance row at the bottom."),
-        ("Daily_Disaggregated_Plan", "Flat store-by-day feed for Power BI."),
         ("Final_Sales_Goals", "Store code, plan date, plan value -- nothing else."),
-        ("Day_Factors", "The 365-day engine behind every daily figure."),
-        ("Plan_Inputs", "The network total and, per store, Recommended vs COO Adjusted with the "
-         "variance. This is where you set a store's annual number."),
         ("[Store] tabs", "One 365-day schedule per store, both tracks side by side. Closure "
          "dates live in columns V to X."),
+        ("Daily_Disaggregated_Plan", "Flat store-by-day feed for Power BI. At the far end, "
+         "after the store tabs."),
+        ("Day_Factors", "The 365-day engine behind every daily figure. Last tab; read-only."),
     ]
     for i, (name, desc) in enumerate(index):
         r = 30 + i
