@@ -103,6 +103,50 @@ ss = st.session_state
 if ss.year not in AVAILABLE_YEARS:
     ss.year = AVAILABLE_YEARS[-1]
 
+def load_forecast(year: int, *, automatic: bool = False) -> None:
+    """Read the per-store forecast for `year` and make it the plan's starting point.
+
+    One implementation for both ways in: the Run Forecast button, and the automatic load when
+    the page first opens. Two copies of this would drift, and what the COO sees on open would
+    stop matching what the button gives them.
+    """
+    try:
+        result = dbx.fetch_store_forecasts(plan_year=year)
+        parsed, warning = dbx.parse_store_forecasts(result, plan_year=year)
+        if result.get("source") == "mock":
+            ss.run_status = ("warning", "Databricks not connected — no live rows returned.")
+        elif warning:
+            ss.run_status = ("error", warning)
+        else:
+            rec = dbx.reconcile(parsed, [s["code"] for s in STORES])
+            ss.db_forecasts = {k: v for k, v in parsed.items()
+                               if k in {s["code"] for s in STORES}}
+            # The forecast IS the recommendation. Leaving the network plan on a typed
+            # round number would keep every store that the forecast does not cover on a
+            # share of a figure nobody stands behind.
+            if ss.db_forecasts:
+                ss.recommended_plan = float(sum(ss.db_forecasts.values()))
+                ss.plan_source = "forecast"
+            level = "success" if rec["matched"] == rec["expected"] else "error"
+            msg = f"Matched {rec['matched']} of {rec['expected']} stores."
+            if automatic:
+                msg = "Loaded automatically when the app opened. " + msg
+            if rec["matched"] < rec["expected"]:
+                msg += (f" Unmatched codes from Databricks: "
+                        f"{rec['unmatched_from_databricks'] or 'none'}. "
+                        f"Stores with no forecast: {rec['missing_from_databricks']}. "
+                        "Those stores fall back to a proportional share.")
+            ss.run_status = (level, msg)
+        # The prediction-interval band for the chart is independent of whether the
+        # annual totals passed the horizon guard -- it is useful either way.
+        try:
+            ss.forecast_band = dbx.fetch_monthly_forecast_band(plan_year=year)
+        except Exception:  # noqa: BLE001
+            ss.forecast_band = {}
+    except Exception as exc:  # noqa: BLE001
+        ss.run_status = ("error", f"Forecast run failed: {exc}")
+
+
 # --- header -----------------------------------------------------------------------------
 # Resolve the Planning Year selector before anything reads YEAR, so the title and every
 # downstream calculation are guaranteed to reflect the selection in this same run.
@@ -112,6 +156,17 @@ with mid:
                         index=AVAILABLE_YEARS.index(ss.year), key="year_select")
 ss.year = year
 YEAR = ss.year
+
+# The forecast is the starting point, so it loads on open rather than waiting for a click.
+# Once per session and year: widgets rerun the whole script on every touch, and re-reading the
+# warehouse each time would be slow and would overwrite what the COO is in the middle of. With
+# no warehouse configured there is nothing to load, so the seeded plan stands and the
+# "Local / Mock Data" badge says why.
+if ss.get("forecast_autoloaded_year") != YEAR:
+    ss.forecast_autoloaded_year = YEAR
+    if dbx.is_configured():
+        with st.spinner(f"Loading the FY{YEAR} forecast from Databricks…"):
+            load_forecast(YEAR, automatic=True)
 with left:
     st.title(f"MERS Goodwill — FY{YEAR} Sales Planning")
     st.caption("Recommendation workbook generator. Every exported cell is a live formula.")
@@ -123,40 +178,10 @@ with right:
         st.warning("Local / Mock Data")
     st.caption(f"auth: {mode}")
 
-    if st.button("Run Forecast", type="primary", width="stretch"):
-        try:
-            result = dbx.fetch_store_forecasts(plan_year=YEAR)
-            parsed, warning = dbx.parse_store_forecasts(result, plan_year=YEAR)
-            if result.get("source") == "mock":
-                ss.run_status = ("warning", "Databricks not connected — no live rows returned.")
-            elif warning:
-                ss.run_status = ("error", warning)
-            else:
-                rec = dbx.reconcile(parsed, [s["code"] for s in STORES])
-                ss.db_forecasts = {k: v for k, v in parsed.items()
-                                   if k in {s["code"] for s in STORES}}
-                # The forecast IS the recommendation. Leaving the network plan on a typed
-                # round number would keep every store that the forecast does not cover on a
-                # share of a figure nobody stands behind.
-                if ss.db_forecasts:
-                    ss.recommended_plan = float(sum(ss.db_forecasts.values()))
-                    ss.plan_source = "forecast"
-                level = "success" if rec["matched"] == rec["expected"] else "error"
-                msg = f"Matched {rec['matched']} of {rec['expected']} stores."
-                if rec["matched"] < rec["expected"]:
-                    msg += (f" Unmatched codes from Databricks: "
-                            f"{rec['unmatched_from_databricks'] or 'none'}. "
-                            f"Stores with no forecast: {rec['missing_from_databricks']}. "
-                            "Those stores fall back to a proportional share.")
-                ss.run_status = (level, msg)
-            # The prediction-interval band for the chart is independent of whether the
-            # annual totals passed the horizon guard -- it is useful either way.
-            try:
-                ss.forecast_band = dbx.fetch_monthly_forecast_band(plan_year=YEAR)
-            except Exception:  # noqa: BLE001
-                ss.forecast_band = {}
-        except Exception as exc:  # noqa: BLE001
-            ss.run_status = ("error", f"Forecast run failed: {exc}")
+    if st.button("Run Forecast", type="primary", width="stretch",
+                 help="Reload the forecast from Databricks. It also loads on its own "
+                      "when the app opens."):
+        load_forecast(YEAR)
 
     if st.button("Use Forecasted Day Mix", width="stretch",
                  help="Replace the weekday-weight curve with the model's own day-of-year "

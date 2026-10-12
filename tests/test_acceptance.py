@@ -1274,6 +1274,118 @@ def test_the_model_day_mix_chosen_in_the_app_reaches_the_file_reshaped():
         assert sheet["B6"].value == "Borrowed" and _distinct_shares(sheet) >= 300, st["code"]
 
 
+import contextlib
+
+
+@contextlib.contextmanager
+def _warehouse(configured=True, rows=None, raises=False):
+    """Stand in for the warehouse and nothing else.
+
+    Only databricks_io.execute is replaced, so fetch_store_forecasts, parse_store_forecasts,
+    the 360-day horizon guard and reconcile are the real ones. Yields the list of statements
+    the app sent, so a test can count queries.
+    """
+    import databricks_io as dbx
+
+    calls = []
+    saved = {k: getattr(dbx, k) for k in
+             ("execute", "is_configured", "auth_mode", "fetch_monthly_forecast_band")}
+
+    def fake_execute(statement):
+        calls.append(statement)
+        if raises:
+            raise RuntimeError("warehouse unavailable")
+        return {"columns": ["store_code", "forecast_total", "first_date", "last_date", "n_days"],
+                "rows": rows or [], "source": "live", "run_timestamp": "t"}
+
+    dbx.execute = fake_execute
+    dbx.is_configured = lambda: configured
+    dbx.auth_mode = lambda: "oauth-m2m" if configured else "mock"
+    dbx.fetch_monthly_forecast_band = lambda plan_year: {}
+    try:
+        yield calls
+    finally:
+        for k, v in saved.items():
+            setattr(dbx, k, v)
+
+
+def _open_app():
+    from streamlit.testing.v1 import AppTest
+
+    at = AppTest.from_file(str(ROOT / "app.py"), default_timeout=180)
+    at.run()                                  # no click anywhere
+    return at
+
+
+def test_the_forecast_is_the_default_when_the_app_opens():
+    """The COO should land on the forecast, not on a typed round number and a button to
+    press. Nothing is clicked here."""
+    rows = _full_year_rows([st["code"] for st in STORES], value=2_000_000.0)
+    with _warehouse(configured=True, rows=rows) as calls:
+        at = _open_app()
+        assert not at.exception, at.exception
+        ss = at.session_state
+        assert len(ss["db_forecasts"]) == len(STORES), len(ss["db_forecasts"])
+        assert abs(ss["recommended_plan"] - 2_000_000.0 * len(STORES)) < 0.01
+        assert ss["plan_source"] == "forecast"
+        level, msg = ss["run_status"]
+        assert level == "success" and "automatically" in msg, ss["run_status"]
+        assert f"Matched {len(STORES)} of {len(STORES)}" in msg
+        assert len(calls) == 1, f"expected one query on open, got {len(calls)}"
+
+        # ...and it is what the page shows: the plan starts from the forecast, not $150M
+        assert any("$" in m.value and "150,000,000" not in m.value for m in at.success)
+
+
+def test_the_forecast_loads_once_not_on_every_interaction():
+    """Streamlit reruns the whole script on every widget touch. Reloading each time would be
+    slow and would overwrite what the COO is in the middle of editing."""
+    rows = _full_year_rows([st["code"] for st in STORES], value=1_000_000.0)
+    with _warehouse(configured=True, rows=rows) as calls:
+        at = _open_app()
+        assert len(calls) == 1
+        at.session_state["growth_rate"] = 0.02
+        at.session_state["store_growth"] = {STORES[0]["code"]: 0.07}
+        at.run()
+        assert not at.exception, at.exception
+        assert len(calls) == 1, f"a widget touch re-queried the warehouse ({len(calls)} queries)"
+        assert at.session_state["growth_rate"] == 0.02, "the COO's edit was overwritten"
+        assert at.session_state["store_growth"] == {STORES[0]["code"]: 0.07}
+        assert len(at.session_state["db_forecasts"]) == len(STORES)
+
+
+def test_with_no_warehouse_the_seeded_plan_stands():
+    """Mock mode must stay exactly as it was: nothing queried, nothing claimed."""
+    with _warehouse(configured=False) as calls:
+        at = _open_app()
+        assert not at.exception, at.exception
+        assert calls == [], "the app queried a warehouse that is not configured"
+        assert at.session_state["db_forecasts"] == {}
+        assert at.session_state["recommended_plan"] == 150_000_000.0
+        assert at.session_state["plan_source"] == "manual"
+        assert at.session_state["run_status"] is None
+
+
+def test_a_failed_load_on_open_leaves_a_usable_page():
+    """A cold or unreachable warehouse must not take the whole page down on open."""
+    with _warehouse(configured=True, raises=True) as calls:
+        at = _open_app()
+        assert not at.exception, at.exception
+        level, msg = at.session_state["run_status"]
+        assert level == "error" and msg.startswith("Forecast run failed"), at.session_state["run_status"]
+        assert at.session_state["db_forecasts"] == {}
+        assert at.session_state["recommended_plan"] == 150_000_000.0, "fell back to the seeded plan"
+        assert any("Forecast run failed" in e.value for e in at.error), "the failure is not shown"
+
+
+def test_the_button_and_the_automatic_load_share_one_implementation():
+    """Two copies would drift, and what the COO sees on open would stop matching what the
+    button gives them."""
+    src = (ROOT / "app.py").read_text(encoding="utf-8")
+    assert src.count("dbx.fetch_store_forecasts(") == 1, "the forecast is fetched in more than one place"
+    assert "load_forecast(YEAR)" in src and "load_forecast(YEAR, automatic=True)" in src
+
+
 def test_blank_growth_cells_fall_back_to_the_default():
     """Reading the edited Stores table back. A blank cell must mean "the default", not 0%
     and not a crash -- 0% would silently strip the 1% from a store the COO only meant to
