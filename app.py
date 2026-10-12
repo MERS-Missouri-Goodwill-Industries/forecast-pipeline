@@ -200,12 +200,14 @@ if ss.day_pct_status:
                 STORES, dict(ss.day_pct_forecast),
                 [d["date"] for d in build_day_factors(YEAR, ss.weights, default_holidays(YEAR))])
             if _borrowed:
+                _desc = ", ".join(
+                    f"{c} ({'all year' if i['whole'] else str(i['days']) + ' days'})"
+                    for c, i in sorted(_borrowed.items()))
                 st.caption(
-                    "No usable day shape from the model for "
-                    + ", ".join(sorted(_borrowed))
-                    + " (no history, or a flat forecast), so each carries a shape averaged "
-                      "from up to three same-region comparables instead of one identical "
-                      "goal every day.")
+                    "The model repeats one value day after day for " + _desc + ", which "
+                    "would price those days identically. Those days take a shape averaged "
+                    "from up to three same-region comparables, keeping the share of the "
+                    "year the model gave them. The rest of each store is the model's own.")
         else:
             st.caption("Weekday weights are driving the daily split. The model day mix is "
                        "loaded and ready if you want it.")

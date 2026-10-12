@@ -68,40 +68,68 @@ def grown_forecast(forecast: float, store_rate: float, network_rate: float) -> f
     return forecast * (1.0 + store_rate) * (1.0 + network_rate)
 
 
-def _flat(values: list[float]) -> bool:
-    """True when a day-share series carries no shape: empty, non-positive, or every day
-    the same to within a millionth of its mean. A store with no history comes out of the
-    model like this -- it has nothing to be seasonal about -- and a flat series prices every
-    day of the year at the same dollar goal."""
-    if not values:
-        return True
-    mean = sum(values) / len(values)
-    return mean <= 0 or (max(values) - min(values)) <= 1e-6 * mean
+# A real daily forecast cannot hold one value for two weeks: it moves with the weekday. A run
+# this long of identical consecutive open-day values is the model saying nothing, not
+# something about the store.
+MIN_FLAT_RUN = 14
+
+
+def flat_stretches(series: list[float], min_run: int = MIN_FLAT_RUN) -> list[list[int]]:
+    """Index runs of identical consecutive OPEN-day values at least `min_run` long.
+
+    Only days with a positive share count. A closed day (a holiday, a Sunday the store is
+    shut) is a zero, and it neither breaks a run nor extends one: a store that reads 0.2786%
+    on every open day and 0% on six closed days is flat for the whole year, and judging it
+    by max-min over all 365 values -- zeros included -- is exactly how the first version of
+    this check let EURS and OFKS straight through.
+    """
+    runs: list[list[int]] = []
+    cur: list[int] = []
+    for i, v in enumerate(series):
+        if v <= 0:
+            continue
+        if cur and abs(v - series[cur[-1]]) <= 1e-6 * series[cur[-1]]:
+            cur.append(i)
+        else:
+            if len(cur) >= min_run:
+                runs.append(cur)
+            cur = [i]
+    if len(cur) >= min_run:
+        runs.append(cur)
+    return runs
 
 
 def borrow_day_shapes(stores: list[dict], day_pct_by_store: dict[str, dict[str, float]] | None,
                       dates: list[str], max_comparables: int = 3
-                      ) -> tuple[dict[str, dict[str, float]], dict[str, list[str]]]:
-    """Give a store with no usable day shape of its own one borrowed from its comparables.
+                      ) -> tuple[dict[str, dict[str, float]], dict[str, dict]]:
+    """Re-shape the stretches of a store's day shares that carry no shape, from comparables.
 
-    Returns (day_pct_by_store with borrowed shapes filled in, {store: [comparable codes]}).
+    Returns (day_pct_by_store with those stretches replaced, {store: info}) where info is
+    {"from": [comparable codes], "days": days re-shaped, "whole": every open day was,
+     "ranges": [(first date, last date, days), ...]}.
 
-    Who gets one:
-      * a NEW store the model has no usable shape for -- missing from it, or present but
-        flat. Without this, a missing store falls back to the repeating weekday curve (six
-        distinct daily goals in 365 days, every Monday identical) and a flat one prices
-        every day of the year the same, while the stores around it each carry 365 distinct
-        days.
-      * any store whose model series is flat, whatever its status: a flat series is equally
-        useless on a continuing store.
-    A continuing store that is simply absent from the model is left alone -- that is the
-    weekday-curve default, not a failure.
+    What counts as "no shape": a run of MIN_FLAT_RUN or more identical consecutive open-day
+    values (see flat_stretches). Measured on the live 2027 forecast, that is three different
+    stores doing three different things:
+      * EURS, OFKS  one constant on all 359 open days -- a store with no history
+      * BANS        one constant from 2 Jan to about May, varied after -- a ramp-up the
+                    model could not shape
+      * FETS        one constant for 2-28 Jan, then real values
+    All of them reached the workbook as the same goal every day.
+
+    Only the flat stretch is touched, and its TOTAL share of the year is kept: the model's
+    level (how much of the year those months carry) survives, and the comparables supply
+    only the shape within it -- the weekday rhythm and the seasonality. Days outside a flat
+    stretch, and every closed day, are left exactly as the model gave them.
+
+    A NEW store the model has no series for at all gets the comparables' shape outright. A
+    continuing store simply absent from the model is left alone: that is the weekday-curve
+    default, not a failure.
 
     Comparables follow the rule the annual number already uses for new stores: up to three
-    continuing stores in the same region, here restricted to those with a usable shape of
-    their own, widening to every region only if the store's own region has none. Their
-    shapes are normalised to a year each and averaged, so one large store cannot swamp the
-    others.
+    continuing stores in the same region, here restricted to those with no flat stretch of
+    their own, widening to every region only if the store's own region has none. Their shapes
+    are normalised to a year each and averaged, so one large store cannot swamp the others.
 
     With no model day mix supplied at all there is nothing to borrow from -- every store is
     on the one weekday curve by design -- so this is a no-op.
@@ -110,33 +138,77 @@ def borrow_day_shapes(stores: list[dict], day_pct_by_store: dict[str, dict[str, 
     if not supplied:
         return {}, {}
 
-    usable: dict[str, list[float]] = {}
-    for code, by_date in supplied.items():
-        series = [float(by_date.get(d, 0.0)) for d in dates]
-        if not _flat(series):
-            usable[code] = series
+    series_of = {code: [float(m.get(d, 0.0)) for d in dates] for code, m in supplied.items()}
+    runs_of = {code: flat_stretches(v) for code, v in series_of.items()}
+    usable = {code: v for code, v in series_of.items() if sum(v) > 0 and not runs_of[code]}
 
     out = dict(supplied)
-    borrowed: dict[str, list[str]] = {}
+    borrowed: dict[str, dict] = {}
     for st in stores:
         code = st["code"]
-        if st["status"] == "Closed" or code in usable:
+        if st["status"] == "Closed":
             continue
-        if st["status"] == "Continuing" and code not in supplied:
+        if code in series_of:
+            runs = runs_of[code]
+            if not runs:
+                continue
+        elif st["status"] == "Continuing":
             continue
+        else:
+            runs = None                                    # new store, nothing from the model
+
         pool = [c for c in stores if c["status"] == "Continuing" and c["code"] in usable]
         same_region = [c for c in pool if c["region"] == st["region"]]
         comps = (same_region or pool)[:max_comparables]
         if not comps:
             continue
+
         mixed = [0.0] * len(dates)
         for c in comps:
             series = usable[c["code"]]
             total = sum(series)
             for i, v in enumerate(series):
                 mixed[i] += v / total / len(comps)
-        out[code] = dict(zip(dates, mixed))
-        borrowed[code] = [c["code"] for c in comps]
+
+        if runs is None:                                   # the whole year, outright
+            new = list(mixed)
+            reshaped = [i for i, v in enumerate(mixed) if v > 0]
+            whole = True
+        else:
+            new = list(series_of[code])
+            reshaped = []
+            for run in runs:
+                mass = sum(series_of[code][i] for i in run)
+                w = [mixed[i] for i in run]
+                positive = [x for x in w if x > 0]
+                if not positive:
+                    continue
+                fill = sum(positive) / len(positive)       # a day the comparables were shut
+                w = [x if x > 0 else fill for x in w]
+                scale = mass / sum(w)
+                for i, wi in zip(run, w):
+                    new[i] = wi * scale
+                reshaped.extend(run)
+            if not reshaped:
+                continue
+            whole = len(reshaped) >= sum(1 for v in series_of[code] if v > 0)
+
+        # contiguous spans of re-shaped days, for the tab to say exactly where
+        spans, block = [], [sorted(reshaped)[0]]
+        for i in sorted(reshaped)[1:]:
+            if i - block[-1] <= 3:                         # a closed day or two between
+                block.append(i)
+            else:
+                spans.append(block)
+                block = [i]
+        spans.append(block)
+        out[code] = dict(zip(dates, new))
+        borrowed[code] = {
+            "from": [c["code"] for c in comps],
+            "days": len(reshaped),
+            "whole": whole,
+            "ranges": [(dates[b[0]], dates[b[-1]], len(b)) for b in spans],
+        }
     return out, borrowed
 # Variance formats put negatives in parentheses rather than [Red], which would be red text
 # on a white cell.
@@ -476,7 +548,7 @@ def build_workbook(
         _store_tab(wb, store, store_start + idx, days, ranges, daily_total_row,
                    df_last, overrides.get(store["code"], {}), year,
                    model_day_pct=day_pct.get(store["code"]),
-                   borrowed_from=borrowed_shapes.get(store["code"]))
+                   borrowed=borrowed_shapes.get(store["code"]))
 
     _exec_calendar_inputs(wb, ecx, session_name, stores, year, weights, holidays, df_last)
     _data_validation(wb, dv, stores, validation_results)
@@ -899,7 +971,7 @@ def _store_tab(wb: Workbook, store: dict, plan_row: int, days: list[dict],
                ranges: list[tuple[int, int]], daily_total_row: int, df_last: int,
                override: dict, year: int,
                model_day_pct: dict[str, float] | None = None,
-               borrowed_from: list[str] | None = None) -> None:
+               borrowed: dict | None = None) -> None:
     s = wb.create_sheet(tab_name(store))
     month_cols = ["E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P"]
 
@@ -922,14 +994,23 @@ def _store_tab(wb: Workbook, store: dict, plan_row: int, days: list[dict],
     _hdr(s["X1"]).value = "Closure Label"
     model_series: list[float] | None = None
     if model_day_pct is not None:
-        _hdr(s["AE8"]).value = ("Borrowed Day % of Year" if borrowed_from
+        whole = bool(borrowed and borrowed["whole"])
+        _hdr(s["AE8"]).value = ("Borrowed Day % of Year" if whole
+                                else "Day % of Year (part borrowed)" if borrowed
                                 else "Model Day % of Year")
-        if borrowed_from:
+        if borrowed:
+            spans = "; ".join(f"{a} to {b} ({n} days)" for a, b, n in borrowed["ranges"][:4])
+            more = " ..." if len(borrowed["ranges"]) > 4 else ""
+            why = ("This store has no usable day shape of its own, so the whole year is "
+                   "borrowed." if whole else
+                   "Part of this store's forecast is one constant value repeated day after "
+                   "day, which would price those days identically. Only those days are "
+                   "re-shaped, and they keep the same total share of the year the model gave "
+                   "them; every other day is the model's own.")
             s["AE8"].comment = Comment(
-                "This store has no usable day shape of its own -- a new store has no history, "
-                "so the model has nothing seasonal to say, and a flat series would price every "
-                "day of the year the same. The shape here is the average of its comparables: "
-                + ", ".join(borrowed_from) + ". Each day is still an editable input.",
+                f"{why} Re-shaped: {spans}{more}. The shape is the average of its "
+                "comparables: " + ", ".join(borrowed["from"]) + ". Each day is still an "
+                "editable input.",
                 "workbook.py",
             )
         s.column_dimensions["AE"].width = 20
@@ -964,7 +1045,8 @@ def _store_tab(wb: Workbook, store: dict, plan_row: int, days: list[dict],
     _fml(s["B5"], PCT2).value = "=(1+B3)*(1+B4)-1"
     _hdr(s["A6"]).value = "Day Shape"
     _fml(s["B6"]).value = ("Weekday curve" if model_day_pct is None
-                           else "Borrowed" if borrowed_from else "Model")
+                           else "Model" if not borrowed
+                           else "Borrowed" if borrowed["whole"] else "Part borrowed")
     s["A3"].comment = Comment(
         "Mirrors Plan_Inputs column K. To change this store's growth, change it there.",
         "workbook.py",
@@ -972,8 +1054,10 @@ def _store_tab(wb: Workbook, store: dict, plan_row: int, days: list[dict],
     s["B6"].comment = Comment(
         "Where this store's day-by-day shape comes from. Weekday curve: the seven weekday "
         "weights, the same for every store. Model: this store's own forecast. Borrowed: "
-        "an average of its comparables, for a store with no history of its own"
-        + (" (" + ", ".join(borrowed_from) + ")." if borrowed_from else "."),
+        "an average of its comparables, for a store with no day shape of its own. Part "
+        "borrowed: the model's own shape, except for stretches where it repeated one value "
+        "day after day"
+        + (" (" + ", ".join(borrowed["from"]) + ")." if borrowed else "."),
         "workbook.py",
     )
     s.column_dimensions["A"].width = 20

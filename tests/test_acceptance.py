@@ -29,7 +29,8 @@ from forecast_engine import (  # noqa: E402
     default_holidays, expand_closures, load_seed, month_row_ranges, weekday_mix,
 )
 from workbook import (  # noqa: E402
-    DEFAULT_GROWTH_RATE, DEFAULT_STORE_GROWTH, borrow_day_shapes, grown_forecast,
+    DEFAULT_GROWTH_RATE, DEFAULT_STORE_GROWTH, MIN_FLAT_RUN, borrow_day_shapes,
+    flat_stretches, grown_forecast,
     build_workbook, tab_name, validate_plan, EXEC_CAL_SHEET_NAME, CAL_OFFSET,
     mm_coo_first_row, mm_coo_network_row, mm_rec_first_row, mm_rec_network_row,
 )
@@ -882,6 +883,7 @@ def test_a_new_store_never_ends_up_with_the_same_goal_every_day():
 
     for label, extra in (("missing from the model", {}),
                          ("flat in the model", {st["code"]: dict(flat) for st in news})):
+        # NB: `flat` has no closed days. The live table's flat stores DO -- see the next test.
         wb = build_workbook(year=YEAR, stores=STORES, weights=WEIGHTS, holidays=HOLIDAYS,
                             recommended_plan=PLAN, day_pct_by_store={**own, **extra})
         for st in news:
@@ -921,7 +923,9 @@ def test_borrowed_shape_is_the_average_of_the_comparables():
     supplied = {c: dict(zip(dates, norm(v))) for c, v in raw.items()}
 
     out, borrowed = borrow_day_shapes(stores, supplied, dates)
-    assert borrowed == {"N": ["A", "B", "C"]}, borrowed      # first three, same region
+    assert set(borrowed) == {"N"}, borrowed
+    assert borrowed["N"]["from"] == ["A", "B", "C"], borrowed   # first three, same region
+    assert borrowed["N"]["whole"] is True and borrowed["N"]["days"] == len(dates)
     want = [sum(norm(raw[c])[i] for c in "ABC") / 3 for i in range(len(dates))]
     want = norm(want)
     got = [out["N"][d] for d in dates]
@@ -931,12 +935,14 @@ def test_borrowed_shape_is_the_average_of_the_comparables():
     # No same-region comparable with a usable shape -> widen to every region.
     only_west = {"W": supplied["W"]}
     _, b2 = borrow_day_shapes(stores, only_west, dates)
-    assert b2 == {"N": ["W"]}, b2
+    assert b2["N"]["from"] == ["W"], b2
 
-    # Nothing usable anywhere -> leave the store alone rather than invent a shape.
-    flat_only = {"A": {d: 0.1 for d in dates}}
-    out3, b3 = borrow_day_shapes(stores, flat_only, dates)
-    assert b3 == {} and out3 == flat_only
+    # Nothing usable anywhere -> leave the store alone rather than invent a shape. The only
+    # series on offer must be genuinely flat, which takes at least MIN_FLAT_RUN days.
+    long_dates = [f"2027-02-{d:02d}" for d in range(1, 29)]
+    flat_only = {"A": {d: 0.1 for d in long_dates}}
+    out3, b3 = borrow_day_shapes(stores, flat_only, long_dates)
+    assert b3 == {} and out3 == flat_only, b3
 
 
 def test_stores_with_a_real_shape_of_their_own_are_left_alone():
@@ -962,12 +968,126 @@ def test_stores_with_a_real_shape_of_their_own_are_left_alone():
 
 def test_a_flat_series_on_a_continuing_store_is_replaced_too():
     """A flat series prices every day identically whatever the store's status."""
-    dates = [f"2027-01-{d:02d}" for d in range(1, 11)]
+    dates = [f"2027-02-{d:02d}" for d in range(1, 29)] + [f"2027-03-{d:02d}" for d in range(1, 13)]
     stores = [{"code": c, "status": "Continuing", "region": "East"} for c in "ABCD"]
     supplied = {"A": _varied_shape(dates, 1), "B": _varied_shape(dates, 2),
-                "C": _varied_shape(dates, 3), "D": {d: 0.1 for d in dates}}
+                "C": _varied_shape(dates, 3), "D": {d: 1 / len(dates) for d in dates}}
     _, borrowed = borrow_day_shapes(stores, supplied, dates)
-    assert borrowed == {"D": ["A", "B", "C"]}, borrowed
+    assert set(borrowed) == {"D"} and borrowed["D"]["from"] == ["A", "B", "C"], borrowed
+    assert borrowed["D"]["whole"] is True
+
+
+def _closed_dates():
+    return {d["date"] for d in build_day_factors(YEAR, WEIGHTS, HOLIDAYS) if d["holiday_label"]}
+
+
+def test_flat_stretches_ignore_closed_days_and_need_two_weeks():
+    """Closed days are zeros. They must neither break a run nor extend one.
+
+    The first version judged flatness by max-min over all 365 values, zeros included, so a
+    store reading 0.2786% on every open day and 0% on six closed days looked wildly varied
+    and sailed through. That is exactly what EURS and OFKS did in production while 70 tests
+    passed, because the fixture had no closed days.
+    """
+    v = 0.002786
+    year = [v if i not in (0, 100, 200, 250, 300, 360) else 0.0 for i in range(365)]
+    runs = flat_stretches(year)
+    assert len(runs) == 1 and len(runs[0]) == 359, [len(r) for r in runs]
+
+    # a weekday rhythm is not flat, however regular
+    weekly = [0.003 + 0.0005 * (i % 7) for i in range(365)]
+    assert flat_stretches(weekly) == []
+
+    # the threshold: 13 identical days is a coincidence, 14 is the model saying nothing
+    assert MIN_FLAT_RUN == 14
+    base = [0.001 * (1 + (i % 7)) for i in range(60)]
+    for n, expect in ((13, 0), (14, 1)):
+        series = list(base)
+        series[10:10 + n] = [0.005] * n
+        assert len(flat_stretches(series)) == expect, (n, flat_stretches(series))
+
+
+def test_a_constant_with_closed_days_is_borrowed_not_passed_through():
+    """EURS and OFKS as the live table gives them: one value on every open day, zero on the
+    closed ones. Through the whole build_workbook path."""
+    news = _new_stores()
+    closed = _closed_dates()
+    dates = [d["date"] for d in build_day_factors(YEAR, WEIGHTS, HOLIDAYS)]
+    n_open = len(dates) - len(closed)
+    own = {st["code"]: _varied_shape(dates, i) for i, st in enumerate(STORES)
+           if st["status"] == "Continuing"}
+    for st in news:
+        own[st["code"]] = {d: (0.0 if d in closed else 1.0 / n_open) for d in dates}
+
+    wb = build_workbook(year=YEAR, stores=STORES, weights=WEIGHTS, holidays=HOLIDAYS,
+                        recommended_plan=PLAN, day_pct_by_store=own)
+    for st in news:
+        sheet = wb[tab_name(st)]
+        assert sheet["B6"].value == "Borrowed", (st["code"], sheet["B6"].value)
+        shares = [float(sheet[f"AE{r}"].value) for r in range(9, 9 + 365)]
+        assert _distinct_shares(sheet) >= 300, st["code"]
+        assert abs(sum(shares) - 1.0) < 1e-9
+        for i, d in enumerate(dates):
+            if d in closed:
+                assert shares[i] == 0.0, f"{st['code']} {d}: a closed day was given a goal"
+
+
+def test_a_partly_flat_store_is_reshaped_only_where_it_is_flat():
+    """BANS and FETS as the live table gives them: continuing stores with real sales whose
+    forecast repeats ONE value for a stretch (BANS: 2 Jan to May; FETS: 2-28 Jan) and is
+    varied elsewhere. A whole-series test cannot see this -- the series as a whole is varied.
+
+    Re-shaping must (a) touch only the flat run, (b) keep the run's total share of the year,
+    so the model's level survives and only the shape within it changes, (c) leave closed
+    days at zero, and (d) leave every other day, including an outlier spike, exactly as the
+    model gave it.
+    """
+    dates = [d["date"] for d in build_day_factors(YEAR, WEIGHTS, HOLIDAYS)]
+    closed = _closed_dates()
+    base = _varied_shape(dates, 5)
+    flat_len = 27
+    open_idx = [i for i, d in enumerate(dates) if d not in closed]
+    run_idx = open_idx[:flat_len]
+
+    series = {d: (0.0 if d in closed else base[d]) for d in dates}
+    level = 0.002627
+    for i in run_idx:
+        series[dates[i]] = level                       # the flat stretch
+    spike = [dates[open_idx[flat_len + k]] for k in range(3)]
+    for d, v in zip(spike, (0.024969, 0.016458, 0.015321)):
+        series[d] = v                                  # FETS's end-of-January surge
+
+    stores = [dict(st) for st in STORES]
+    code = next(st["code"] for st in stores if st["status"] == "Continuing")
+    own = {st["code"]: _varied_shape(dates, i) for i, st in enumerate(stores)
+           if st["status"] == "Continuing" and st["code"] != code}
+    own[code] = series
+
+    out, borrowed = borrow_day_shapes(stores, own, dates)
+    info = borrowed[code]
+    assert info["whole"] is False and info["days"] == flat_len, info
+    assert info["ranges"][0][0] == dates[run_idx[0]] and info["ranges"][0][1] == dates[run_idx[-1]]
+
+    new = out[code]
+    # (b) mass of the run is preserved
+    assert abs(sum(series[dates[i]] for i in run_idx) - sum(new[dates[i]] for i in run_idx)) < 1e-12
+    # the run is no longer one value
+    assert len({round(new[dates[i]], 9) for i in run_idx}) >= flat_len - 3
+    # (c) closed days stay closed, (d) everything outside the run is untouched
+    for i, d in enumerate(dates):
+        if d in closed:
+            assert new[d] == 0.0, f"{d}: a closed day was given a goal"
+        elif i not in run_idx:
+            assert new[d] == series[d], f"{d}: a day outside the flat run was changed"
+    assert [new[d] for d in spike] == [0.024969, 0.016458, 0.015321], "the spike must be left alone"
+
+    # and the tab says exactly that
+    wb = build_workbook(year=YEAR, stores=STORES, weights=WEIGHTS, holidays=HOLIDAYS,
+                        recommended_plan=PLAN, day_pct_by_store=own)
+    sheet = wb[tab_name(next(st for st in STORES if st["code"] == code))]
+    assert sheet["B6"].value == "Part borrowed", sheet["B6"].value
+    assert sheet["AE8"].value == "Day % of Year (part borrowed)"
+    assert dates[run_idx[0]] in sheet["AE8"].comment.text
 
 
 def test_every_store_tab_shows_its_growth_rate():
@@ -1016,8 +1136,11 @@ def test_the_apps_borrowed_list_matches_the_workbook_and_reaches_the_file():
     dates = [d["date"] for d in build_day_factors(YEAR, WEIGHTS, HOLIDAYS)]
     model = {st["code"]: _varied_shape(dates, i) for i, st in enumerate(STORES)
              if st["status"] == "Continuing"}
-    for st in news:
-        model[st["code"]] = {d: 1.0 / 365 for d in dates}      # flat: no history
+    closed = {d["date"] for d in build_day_factors(YEAR, WEIGHTS, HOLIDAYS)
+              if d["holiday_label"]}
+    n_open = len(dates) - len(closed)
+    for st in news:                  # what the live table gives a store with no history
+        model[st["code"]] = {d: (0.0 if d in closed else 1.0 / n_open) for d in dates}
 
     captured = {}
     real = _wb_mod.workbook_bytes
