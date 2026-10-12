@@ -29,7 +29,7 @@ from forecast_engine import (  # noqa: E402
     default_holidays, expand_closures, load_seed, month_row_ranges, weekday_mix,
 )
 from workbook import (  # noqa: E402
-    DEFAULT_GROWTH_RATE, DEFAULT_STORE_GROWTH, grown_forecast,
+    DEFAULT_GROWTH_RATE, DEFAULT_STORE_GROWTH, borrow_day_shapes, grown_forecast,
     build_workbook, tab_name, validate_plan, EXEC_CAL_SHEET_NAME, CAL_OFFSET,
     mm_coo_first_row, mm_coo_network_row, mm_rec_first_row, mm_rec_network_row,
 )
@@ -469,7 +469,9 @@ def test_model_day_mix_is_opt_in_and_per_store():
     with no model data keeps the flat curve, so Criterion 7 still holds for it."""
     stores = STORES[:3]
     days = _days()
-    supplied = {stores[0]["code"]: _model_day_pct(days),
+    # Both series must carry a real shape. skew=0 is FLAT, and a flat series is treated as
+    # "no shape" and replaced by a borrowed one -- that is the behaviour under test elsewhere.
+    supplied = {stores[0]["code"]: _model_day_pct(days, skew=0.15),
                 stores[1]["code"]: _model_day_pct(days, skew=0.3)}
 
     wb = build_workbook(year=YEAR, stores=stores, weights=WEIGHTS, holidays=HOLIDAYS,
@@ -782,6 +784,269 @@ def test_plan_inputs_total_row_reports_the_blended_store_rate():
     k = [float(s[f"K{r}"].value) for r in (14, 15)]
     blended = sum(a * b for a, b in zip(j, k)) / sum(j)
     assert abs(blended - 0.028) < 1e-9, blended
+
+
+def test_growth_chosen_in_the_app_lands_in_the_downloaded_workbook():
+    """End to end through the REAL app.py: set rates in session state, click Build Workbook,
+    and read column K back out of the file the app produced.
+
+    The earlier screen-vs-file test pins the source text of the call. This one proves the
+    behaviour -- that what the COO selected on the page is what is in the file -- which is
+    the thing that has gone wrong in this project before (60 stores once disagreed between
+    the page and the download because a value was never passed through).
+
+    workbook_bytes is wrapped, not replaced, so the genuine call from app.py is what runs.
+    """
+    import io as _io
+
+    import openpyxl
+    from streamlit.testing.v1 import AppTest
+
+    import workbook as _wb_mod
+
+    captured = {}
+    real = _wb_mod.workbook_bytes
+
+    def spy(**kwargs):
+        captured["kwargs"] = kwargs
+        captured["bytes"] = real(**kwargs)
+        return captured["bytes"]
+
+    _wb_mod.workbook_bytes = spy
+    try:
+        at = AppTest.from_file(str(ROOT / "app.py"), default_timeout=120)
+        chosen = {"ALTS": 0.08, "LEAD": 0.0, "CAPS": -0.03}
+        at.session_state["store_growth"] = chosen
+        at.session_state["growth_rate"] = 0.02
+        at.run()
+        assert not at.exception, at.exception
+        buttons = [b for b in at.button if "Build Workbook" in (b.label or "")]
+        assert buttons, "Build Workbook button not found"
+        buttons[0].click().run()
+        assert not at.exception, at.exception
+    finally:
+        _wb_mod.workbook_bytes = real
+
+    assert "bytes" in captured, "clicking Build Workbook never reached workbook_bytes"
+    sheet = openpyxl.load_workbook(_io.BytesIO(captured["bytes"]))["Plan_Inputs"]
+
+    assert abs(float(sheet["B9"].value) - 0.02) < 1e-12, "the all-stores rate did not arrive"
+    by_code = {sheet[f"A{r}"].value: r for r in range(14, 14 + len(STORES))}
+    for code, rate in chosen.items():
+        got = float(sheet[f"K{by_code[code]}"].value)
+        assert abs(got - rate) < 1e-12, f"{code}: app chose {rate}, workbook has {got}"
+
+    # Every OTHER store must read the 1% default, not 0 and not blank.
+    others = [c for c in by_code if c not in chosen]
+    assert others, "no stores left to check"
+    for code in others:
+        got = float(sheet[f"K{by_code[code]}"].value)
+        assert abs(got - DEFAULT_STORE_GROWTH) < 1e-12, f"{code} opened at {got}, not 1%"
+
+
+def _varied_shape(dates, seed):
+    """A day-share series with genuine shape, normalised to one year."""
+    import math
+    import random
+
+    r = random.Random(seed)
+    raw = {d: 1.0 + 0.6 * math.sin(i / 11.0) + r.uniform(-0.25, 0.25)
+           + (0.3 if i % 7 in (4, 5) else 0.0) for i, d in enumerate(dates)}
+    total = sum(raw.values())
+    return {d: v / total for d, v in raw.items()}
+
+
+def _new_stores():
+    return [st for st in STORES if st["status"] not in ("Continuing", "Closed")]
+
+
+def _distinct_shares(sheet):
+    return len({round(float(sheet[f"AE{r}"].value), 12) for r in range(9, 9 + 365)})
+
+
+def test_a_new_store_never_ends_up_with_the_same_goal_every_day():
+    """The reported problem. A new store has no history, so the model either has no shape for
+    it or a flat one, and both used to reach the workbook as a repeating pattern while every
+    neighbouring store carried 365 distinct days:
+
+      * missing from the model -> fell back to the weekday curve: 6 distinct daily goals in
+        365 days, every Monday identical
+      * present but flat       -> literally the same goal every day (2 distinct values)
+    """
+    news = _new_stores()
+    assert news, "the roster needs at least one new store for this to mean anything"
+    dates = [d["date"] for d in build_day_factors(YEAR, WEIGHTS, HOLIDAYS)]
+    own = {st["code"]: _varied_shape(dates, i) for i, st in enumerate(STORES)
+           if st["status"] == "Continuing"}
+    flat = {d: 1.0 / 365 for d in dates}
+
+    for label, extra in (("missing from the model", {}),
+                         ("flat in the model", {st["code"]: dict(flat) for st in news})):
+        wb = build_workbook(year=YEAR, stores=STORES, weights=WEIGHTS, holidays=HOLIDAYS,
+                            recommended_plan=PLAN, day_pct_by_store={**own, **extra})
+        for st in news:
+            sheet = wb[tab_name(st)]
+            assert sheet["AE8"].value == "Borrowed Day % of Year", (label, st["code"])
+            assert sheet["B6"].value == "Borrowed"
+            n = _distinct_shares(sheet)
+            assert n >= 300, f"{st['code']} ({label}): only {n} distinct daily shares in 365"
+            total = sum(float(sheet[f"AE{r}"].value) for r in range(9, 9 + 365))
+            assert abs(total - 1.0) < 1e-9, f"{st['code']}: borrowed shape totals {total!r}"
+
+            # and it says WHERE it came from
+            note = sheet["AE8"].comment.text
+            comps = [c["code"] for c in STORES
+                     if c["status"] == "Continuing" and c["region"] == st["region"]][:3]
+            assert comps and all(c in note for c in comps), (note, comps)
+
+
+def test_borrowed_shape_is_the_average_of_the_comparables():
+    dates = [f"2027-01-{d:02d}" for d in range(1, 11)]
+    stores = [
+        {"code": "A", "status": "Continuing", "region": "East"},
+        {"code": "B", "status": "Continuing", "region": "East"},
+        {"code": "C", "status": "Continuing", "region": "East"},
+        {"code": "D", "status": "Continuing", "region": "East"},   # a 4th: must NOT be used
+        {"code": "W", "status": "Continuing", "region": "West"},
+        {"code": "N", "status": "New store", "region": "East"},
+    ]
+
+    def norm(vals):
+        t = sum(vals)
+        return [v / t for v in vals]
+
+    raw = {"A": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], "B": [10, 9, 8, 7, 6, 5, 4, 3, 2, 1],
+           "C": [5, 1, 5, 1, 5, 1, 5, 1, 5, 1], "D": [1] * 4 + [50] * 6,
+           "W": [3, 3, 3, 9, 9, 9, 1, 1, 1, 1]}
+    supplied = {c: dict(zip(dates, norm(v))) for c, v in raw.items()}
+
+    out, borrowed = borrow_day_shapes(stores, supplied, dates)
+    assert borrowed == {"N": ["A", "B", "C"]}, borrowed      # first three, same region
+    want = [sum(norm(raw[c])[i] for c in "ABC") / 3 for i in range(len(dates))]
+    want = norm(want)
+    got = [out["N"][d] for d in dates]
+    assert all(abs(a - b) < 1e-12 for a, b in zip(got, want)), (got, want)
+    assert abs(sum(got) - 1.0) < 1e-12
+
+    # No same-region comparable with a usable shape -> widen to every region.
+    only_west = {"W": supplied["W"]}
+    _, b2 = borrow_day_shapes(stores, only_west, dates)
+    assert b2 == {"N": ["W"]}, b2
+
+    # Nothing usable anywhere -> leave the store alone rather than invent a shape.
+    flat_only = {"A": {d: 0.1 for d in dates}}
+    out3, b3 = borrow_day_shapes(stores, flat_only, dates)
+    assert b3 == {} and out3 == flat_only
+
+
+def test_stores_with_a_real_shape_of_their_own_are_left_alone():
+    dates = [f"2027-01-{d:02d}" for d in range(1, 11)]
+    shape = _varied_shape(dates, 3)
+    stores = [
+        {"code": "A", "status": "Continuing", "region": "East"},
+        {"code": "N", "status": "New store", "region": "East"},      # new, but has its own
+        {"code": "X", "status": "Continuing", "region": "East"},     # absent from the model
+        {"code": "Z", "status": "Closed", "region": "East"},
+    ]
+    supplied = {"A": shape, "N": _varied_shape(dates, 9)}
+    out, borrowed = borrow_day_shapes(stores, supplied, dates)
+    assert borrowed == {}, f"nobody needed a borrowed shape: {borrowed}"
+    assert out["N"] == supplied["N"], "a new store's own real shape was overwritten"
+    assert "X" not in out, "a continuing store missing from the model is the weekday default"
+    assert "Z" not in out, "a closed store has no sales to shape"
+
+    # With no model day mix at all, every store is on the weekday curve by design.
+    assert borrow_day_shapes(stores, None, dates) == ({}, {})
+    assert borrow_day_shapes(stores, {}, dates) == ({}, {})
+
+
+def test_a_flat_series_on_a_continuing_store_is_replaced_too():
+    """A flat series prices every day identically whatever the store's status."""
+    dates = [f"2027-01-{d:02d}" for d in range(1, 11)]
+    stores = [{"code": c, "status": "Continuing", "region": "East"} for c in "ABCD"]
+    supplied = {"A": _varied_shape(dates, 1), "B": _varied_shape(dates, 2),
+                "C": _varied_shape(dates, 3), "D": {d: 0.1 for d in dates}}
+    _, borrowed = borrow_day_shapes(stores, supplied, dates)
+    assert borrowed == {"D": ["A", "B", "C"]}, borrowed
+
+
+def test_every_store_tab_shows_its_growth_rate():
+    """Plan_Inputs column K and B9 are where a rate is typed; every store tab mirrors them so
+    the number behind a store's Recommended is on the page that shows it."""
+    wb = build_workbook(year=YEAR, stores=STORES, weights=WEIGHTS, holidays=HOLIDAYS,
+                        recommended_plan=PLAN, growth_rate=0.02,
+                        store_growth={STORES[3]["code"]: 0.07})
+    pi = wb["Plan_Inputs"]
+    for idx, st in enumerate(STORES):
+        sheet = wb[tab_name(st)]
+        row = 14 + idx
+        assert sheet["A3"].value == "Store Growth %"
+        assert sheet["B3"].value == f"='Plan_Inputs'!$K${row}", (st["code"], sheet["B3"].value)
+        assert sheet["A4"].value == "Network Growth %"
+        assert sheet["B4"].value == "='Plan_Inputs'!$B$9"
+        assert sheet["A5"].value == "Combined Growth %"
+        assert sheet["B5"].value == "=(1+B3)*(1+B4)-1"
+        assert sheet["A6"].value == "Day Shape" and sheet["B6"].value == "Weekday curve"
+        # the row it points at really is this store's row
+        assert pi[f"A{row}"].value == st["code"], f"{st['code']} points at {pi[f'A{row}'].value}"
+    assert abs(float(pi[f"K{14 + 3}"].value) - 0.07) < 1e-12
+
+    # They are mirrors, not inputs: nothing here may be styled as a typed cell.
+    sample = wb[tab_name(STORES[0])]
+    for ref in ("B3", "B4", "B5"):
+        assert sample[ref].font.color.rgb != _wb_input_font(wb), f"{ref} looks editable"
+
+
+def _wb_input_font(wb):
+    return wb["Plan_Inputs"]["B9"].font.color.rgb
+
+
+def test_the_apps_borrowed_list_matches_the_workbook_and_reaches_the_file():
+    """Through the real app: turn the model day mix on, check the page names the stores that
+    borrow a shape, click Build Workbook, and confirm those same tabs say so. One function
+    (borrow_day_shapes) decides, so the screen and the file cannot disagree."""
+    import io as _io
+
+    import openpyxl
+    from streamlit.testing.v1 import AppTest
+
+    import workbook as _wb_mod
+
+    news = _new_stores()
+    dates = [d["date"] for d in build_day_factors(YEAR, WEIGHTS, HOLIDAYS)]
+    model = {st["code"]: _varied_shape(dates, i) for i, st in enumerate(STORES)
+             if st["status"] == "Continuing"}
+    for st in news:
+        model[st["code"]] = {d: 1.0 / 365 for d in dates}      # flat: no history
+
+    captured = {}
+    real = _wb_mod.workbook_bytes
+
+    def spy(**kwargs):
+        captured["bytes"] = real(**kwargs)
+        return captured["bytes"]
+
+    _wb_mod.workbook_bytes = spy
+    try:
+        at = AppTest.from_file(str(ROOT / "app.py"), default_timeout=180)
+        at.session_state["day_pct_forecast"] = model
+        at.session_state["day_pct_status"] = ("success", "loaded")
+        at.session_state["use_model_day_mix"] = True
+        at.run()
+        assert not at.exception, at.exception
+        captions = " ".join(c.value for c in at.caption)
+        for st in news:
+            assert st["code"] in captions, f"the page does not name {st['code']}: {captions[:300]}"
+        buttons = [b for b in at.button if "Build Workbook" in (b.label or "")]
+        buttons[0].click().run()
+        assert not at.exception, at.exception
+    finally:
+        _wb_mod.workbook_bytes = real
+
+    wb = openpyxl.load_workbook(_io.BytesIO(captured["bytes"]))
+    for st in news:
+        sheet = wb[tab_name(st)]
+        assert sheet["B6"].value == "Borrowed" and _distinct_shares(sheet) >= 300, st["code"]
 
 
 def test_blank_growth_cells_fall_back_to_the_default():

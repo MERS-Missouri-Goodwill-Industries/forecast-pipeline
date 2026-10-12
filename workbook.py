@@ -66,6 +66,78 @@ def grown_forecast(forecast: float, store_rate: float, network_rate: float) -> f
     disagreed store by store -- so there is one function, not two copies of a formula.
     """
     return forecast * (1.0 + store_rate) * (1.0 + network_rate)
+
+
+def _flat(values: list[float]) -> bool:
+    """True when a day-share series carries no shape: empty, non-positive, or every day
+    the same to within a millionth of its mean. A store with no history comes out of the
+    model like this -- it has nothing to be seasonal about -- and a flat series prices every
+    day of the year at the same dollar goal."""
+    if not values:
+        return True
+    mean = sum(values) / len(values)
+    return mean <= 0 or (max(values) - min(values)) <= 1e-6 * mean
+
+
+def borrow_day_shapes(stores: list[dict], day_pct_by_store: dict[str, dict[str, float]] | None,
+                      dates: list[str], max_comparables: int = 3
+                      ) -> tuple[dict[str, dict[str, float]], dict[str, list[str]]]:
+    """Give a store with no usable day shape of its own one borrowed from its comparables.
+
+    Returns (day_pct_by_store with borrowed shapes filled in, {store: [comparable codes]}).
+
+    Who gets one:
+      * a NEW store the model has no usable shape for -- missing from it, or present but
+        flat. Without this, a missing store falls back to the repeating weekday curve (six
+        distinct daily goals in 365 days, every Monday identical) and a flat one prices
+        every day of the year the same, while the stores around it each carry 365 distinct
+        days.
+      * any store whose model series is flat, whatever its status: a flat series is equally
+        useless on a continuing store.
+    A continuing store that is simply absent from the model is left alone -- that is the
+    weekday-curve default, not a failure.
+
+    Comparables follow the rule the annual number already uses for new stores: up to three
+    continuing stores in the same region, here restricted to those with a usable shape of
+    their own, widening to every region only if the store's own region has none. Their
+    shapes are normalised to a year each and averaged, so one large store cannot swamp the
+    others.
+
+    With no model day mix supplied at all there is nothing to borrow from -- every store is
+    on the one weekday curve by design -- so this is a no-op.
+    """
+    supplied = day_pct_by_store or {}
+    if not supplied:
+        return {}, {}
+
+    usable: dict[str, list[float]] = {}
+    for code, by_date in supplied.items():
+        series = [float(by_date.get(d, 0.0)) for d in dates]
+        if not _flat(series):
+            usable[code] = series
+
+    out = dict(supplied)
+    borrowed: dict[str, list[str]] = {}
+    for st in stores:
+        code = st["code"]
+        if st["status"] == "Closed" or code in usable:
+            continue
+        if st["status"] == "Continuing" and code not in supplied:
+            continue
+        pool = [c for c in stores if c["status"] == "Continuing" and c["code"] in usable]
+        same_region = [c for c in pool if c["region"] == st["region"]]
+        comps = (same_region or pool)[:max_comparables]
+        if not comps:
+            continue
+        mixed = [0.0] * len(dates)
+        for c in comps:
+            series = usable[c["code"]]
+            total = sum(series)
+            for i, v in enumerate(series):
+                mixed[i] += v / total / len(comps)
+        out[code] = dict(zip(dates, mixed))
+        borrowed[code] = [c["code"] for c in comps]
+    return out, borrowed
 # Variance formats put negatives in parentheses rather than [Red], which would be red text
 # on a white cell.
 MONEY_VAR = "$#,##0;($#,##0)"
@@ -398,11 +470,13 @@ def build_workbook(
     # Per-store day shares are opt-in. Without them every store keeps the single flat
     # weekday curve, which is what Criterion 7 guarantees; with them a store carries its
     # own shape and that guarantee applies only to the stores still on the curve.
-    day_pct = day_pct_by_store or {}
+    day_pct, borrowed_shapes = borrow_day_shapes(
+        stores, day_pct_by_store, [d["date"] for d in days])
     for idx, store in enumerate(stores):
         _store_tab(wb, store, store_start + idx, days, ranges, daily_total_row,
                    df_last, overrides.get(store["code"], {}), year,
-                   model_day_pct=day_pct.get(store["code"]))
+                   model_day_pct=day_pct.get(store["code"]),
+                   borrowed_from=borrowed_shapes.get(store["code"]))
 
     _exec_calendar_inputs(wb, ecx, session_name, stores, year, weights, holidays, df_last)
     _data_validation(wb, dv, stores, validation_results)
@@ -530,7 +604,9 @@ def _how_to_use(wb: Workbook, session_name: str, author: str) -> None:
 
     guide = [
         ("Column E — Day % of Annual",
-         "This day's slice of the whole year. The same seven values for every store, all year. "
+         "This day's slice of the whole year. On the weekday curve (the default) it is the "
+         "same seven values for every store. With the model's day mix on, each store carries "
+         "its own shape, and a new store with no history borrows one from its comparables. "
          "A closed day reads 0%. See the Weekday Mix table on Exec Calendar Inputs."),
         ("Column C — Recommended Sales",
          "The forecast for that day: the store's Recommended annual (S2) x Day % of Annual. "
@@ -550,6 +626,10 @@ def _how_to_use(wb: Workbook, session_name: str, author: str) -> None:
         ("Cell Q6 — Days vs Annual Input",
          "The 365 daily amounts (Q3) against the annual figure they were priced from (T2). "
          "$0.00 until you clear days; then it shows exactly how much you removed. Not an error."),
+        ("Cells A3 to B6 — Growth and Day Shape",
+         "This store's growth %, the network-wide growth %, the two combined, and where its "
+         "day-by-day shape comes from. All mirrored from elsewhere: change growth on "
+         "Plan_Inputs (column K for this store, B9 for all stores)."),
     ]
     for i, (label, desc) in enumerate(guide):
         r = 42 + i
@@ -818,7 +898,8 @@ def _plan_inputs(wb: Workbook, stores: list[dict], recommended: dict[str, float]
 def _store_tab(wb: Workbook, store: dict, plan_row: int, days: list[dict],
                ranges: list[tuple[int, int]], daily_total_row: int, df_last: int,
                override: dict, year: int,
-               model_day_pct: dict[str, float] | None = None) -> None:
+               model_day_pct: dict[str, float] | None = None,
+               borrowed_from: list[str] | None = None) -> None:
     s = wb.create_sheet(tab_name(store))
     month_cols = ["E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P"]
 
@@ -841,7 +922,16 @@ def _store_tab(wb: Workbook, store: dict, plan_row: int, days: list[dict],
     _hdr(s["X1"]).value = "Closure Label"
     model_series: list[float] | None = None
     if model_day_pct is not None:
-        _hdr(s["AE8"]).value = "Model Day % of Year"
+        _hdr(s["AE8"]).value = ("Borrowed Day % of Year" if borrowed_from
+                                else "Model Day % of Year")
+        if borrowed_from:
+            s["AE8"].comment = Comment(
+                "This store has no usable day shape of its own -- a new store has no history, "
+                "so the model has nothing seasonal to say, and a flat series would price every "
+                "day of the year the same. The shape here is the average of its comparables: "
+                + ", ".join(borrowed_from) + ". Each day is still an editable input.",
+                "workbook.py",
+            )
         s.column_dimensions["AE"].width = 20
         # Normalize, then let the final day absorb the rounding residual. Rounding 365
         # values independently leaves the column summing to something like 1.00000145, and
@@ -861,6 +951,32 @@ def _store_tab(wb: Workbook, store: dict, plan_row: int, days: list[dict],
     _hdr(s["D4"]).value = "Variance ($)"
     _hdr(s["D5"]).value = "Variance (%)"
     _hdr(s["D6"]).value = "Days vs Annual Input"
+
+    # The growth behind this store's Recommended number, so a COO reading the tab does not
+    # have to go back to Plan_Inputs to learn why it is what it is. These are MIRRORS --
+    # green, read-only -- because Plan_Inputs column K and B9 are the single place a rate is
+    # typed. A second typed copy here would be a second place to keep consistent.
+    _hdr(s["A3"]).value = "Store Growth %"
+    _xs(s["B3"], PCT2).value = f'={sheet_ref("Plan_Inputs", f"$K${plan_row}")}'
+    _hdr(s["A4"]).value = "Network Growth %"
+    _xs(s["B4"], PCT2).value = f'={sheet_ref("Plan_Inputs", "$B$9")}'
+    _hdr(s["A5"]).value = "Combined Growth %"
+    _fml(s["B5"], PCT2).value = "=(1+B3)*(1+B4)-1"
+    _hdr(s["A6"]).value = "Day Shape"
+    _fml(s["B6"]).value = ("Weekday curve" if model_day_pct is None
+                           else "Borrowed" if borrowed_from else "Model")
+    s["A3"].comment = Comment(
+        "Mirrors Plan_Inputs column K. To change this store's growth, change it there.",
+        "workbook.py",
+    )
+    s["B6"].comment = Comment(
+        "Where this store's day-by-day shape comes from. Weekday curve: the seven weekday "
+        "weights, the same for every store. Model: this store's own forecast. Borrowed: "
+        "an average of its comparables, for a store with no history of its own"
+        + (" (" + ", ".join(borrowed_from) + ")." if borrowed_from else "."),
+        "workbook.py",
+    )
+    s.column_dimensions["A"].width = 20
 
     for i in range(max(1, len(closures))):
         r = 2 + i

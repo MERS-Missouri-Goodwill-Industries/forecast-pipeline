@@ -19,7 +19,8 @@ from forecast_engine import (
     weekday_mix,
 )
 from workbook import (
-    DEFAULT_GROWTH_RATE, DEFAULT_STORE_GROWTH, grown_forecast, workbook_bytes,
+    DEFAULT_GROWTH_RATE, DEFAULT_STORE_GROWTH, borrow_day_shapes, grown_forecast,
+    workbook_bytes,
 )
 
 MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
@@ -123,7 +124,7 @@ with right:
         st.warning("Local / Mock Data")
     st.caption(f"auth: {mode}")
 
-    if st.button("Run Forecast", type="primary", use_container_width=True):
+    if st.button("Run Forecast", type="primary", width="stretch"):
         try:
             result = dbx.fetch_store_forecasts(plan_year=YEAR)
             parsed, warning = dbx.parse_store_forecasts(result, plan_year=YEAR)
@@ -158,7 +159,7 @@ with right:
         except Exception as exc:  # noqa: BLE001
             ss.run_status = ("error", f"Forecast run failed: {exc}")
 
-    if st.button("Use Forecasted Day Mix", use_container_width=True,
+    if st.button("Use Forecasted Day Mix", width="stretch",
                  help="Replace the weekday-weight curve with the model's own day-of-year "
                       "percentages, if the forecast pipeline is publishing them yet."):
         try:
@@ -193,6 +194,18 @@ if ss.day_pct_status:
         if ss.use_model_day_mix:
             st.caption("Store tabs carry their own day shares (column AE). The weekday "
                        "weights below no longer drive the daily split while this is on.")
+            # The same function the workbook calls, so this list is exactly the set of
+            # stores whose tab says "Borrowed" -- not a second opinion about who qualifies.
+            _, _borrowed = borrow_day_shapes(
+                STORES, dict(ss.day_pct_forecast),
+                [d["date"] for d in build_day_factors(YEAR, ss.weights, default_holidays(YEAR))])
+            if _borrowed:
+                st.caption(
+                    "No usable day shape from the model for "
+                    + ", ".join(sorted(_borrowed))
+                    + " (no history, or a flat forecast), so each carries a shape averaged "
+                      "from up to three same-region comparables instead of one identical "
+                      "goal every day.")
         else:
             st.caption("Weekday weights are driving the daily split. The model day mix is "
                        "loaded and ready if you want it.")
@@ -248,7 +261,7 @@ st.markdown(
 )
 st.subheader("Export")
 with st.container(key="export_build"):
-    if st.button("📥  Build Workbook", type="primary", use_container_width=True):
+    if st.button("📥  Build Workbook", type="primary", width="stretch"):
         with st.spinner("Generating 73 sheets…"):
             # Pass the Databricks forecasts through, or the workbook silently rebuilds the
             # proportional split and disagrees with the figures shown on this screen.
@@ -357,7 +370,7 @@ with c2:
         [{"Day": m["day"], "Wkdy #": m["weekday_number"],
           "Day % of Annual": f"{m['day_pct_of_annual'] * 100:.4f}%",
           "% of Week": f"{m['pct_of_week'] * 100:.1f}%"} for m in weekday_mix(days)],
-        hide_index=True, use_container_width=True,
+        hide_index=True, width="stretch",
     )
     mix = weekday_mix(days)
     wknd = sum(m["pct_of_week"] for m in mix if m["day"] in ("Saturday", "Sunday"))
@@ -382,7 +395,7 @@ with c2:
         # (WCAG 1.4.1) -- colour-blind readers and greyscale printouts still get it.
         .format(lambda v: f"{v:.0f} *" if v == 53 else f"{v:.0f}")
     )
-    st.dataframe(styled, use_container_width=True)
+    st.dataframe(styled, width="stretch")
     st.caption(f"FY{YEAR} is shown in bold. **53 \\*** marks a weekday that falls 53 times "
                "that year instead of the usual 52 — the extra selling day to weight for.")
 
@@ -432,7 +445,7 @@ with c2:
             color=alt.Color("Series:N", scale=scale, title=None),
             tooltip=["Month", "Planned Sales"],
         )
-        st.altair_chart(band + mid + line, use_container_width=True)
+        st.altair_chart(band + mid + line, width="stretch")
         covered = [m["month"] for m in band_months]
         st.caption(
             f"Grey band = the model's forecast range (forecast_lower to forecast_upper), "
@@ -452,7 +465,7 @@ with c2:
                     scale=alt.Scale(zero=False)),
             tooltip=["Month", "Planned Sales"],
         )
-        st.altair_chart(line, use_container_width=True)
+        st.altair_chart(line, width="stretch")
         st.caption("The COO Adjusted plan spread across the year by the weekday weights — "
                    "the shape every daily cell in the workbook is priced off. The vertical "
                    "axis does not start at zero, so the month-to-month differences are "
@@ -465,7 +478,7 @@ with c2:
             [{"Month": m, "Planned Sales": f"${v:,.0f}",
               "% of Year": f"{(v / coo_total * 100) if coo_total else 0:.2f}%"}
              for m, v in zip(MONTH_ABBR, plan_monthly)],
-            hide_index=True, use_container_width=True,
+            hide_index=True, width="stretch",
         )
 
     # The real decision surface: what the COO moved, per store. Rendered only when there
@@ -507,7 +520,7 @@ with c2:
         # the store labels almost on top of each other, and a height that excludes the
         # axis band is what gives a chart its own tiny scrollbar.
         ).properties(height=min(700, 34 * len(delta_df) + 70))
-        st.altair_chart(bars, use_container_width=True)
+        st.altair_chart(bars, width="stretch")
         net = sum(d for _, d in deltas)
         st.caption(
             f"{len(deltas)} of {len(STORES)} stores overridden, biggest move first. "
@@ -534,7 +547,7 @@ edited = st.data_editor(
       "COO Adjusted": ss.overrides.get(s["code"]),
       "Variance": round(effective.get(s["code"], 0.0) - recommended_of.get(s["code"], 0.0), 2)}
      for s in STORES],
-    hide_index=True, use_container_width=True, height=380,
+    hide_index=True, width="stretch", height=380,
     disabled=["Code", "Store", "Region", "Location Type", "Status", "Forecasted",
               "Recommended", "Variance"],
     column_config={
