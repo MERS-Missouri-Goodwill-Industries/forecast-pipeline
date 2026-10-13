@@ -91,6 +91,16 @@ def fourth_thursday_november(year: int) -> dt.date:
     return d + dt.timedelta(days=(3 - d.weekday()) % 7 + 21)
 
 
+def available_years(today: dt.date, first_year: int = 2027) -> list[int]:
+    """Planning years on offer. The next year is added on December 1st.
+
+    Through November the plan year is the current calendar year; from December 1st it is the
+    next one, so planning for a year can start a month before it opens. Never below first_year.
+    """
+    latest = today.year + (1 if today.month == 12 else 0)
+    return list(range(first_year, max(first_year, latest) + 1))
+
+
 def default_holidays(year: int) -> list[dict]:
     return [
         {"date": dt.date(year, 1, 1).isoformat(), "label": "New Year's Day"},

@@ -953,7 +953,7 @@ def _plan_inputs(wb: Workbook, stores: list[dict], recommended: dict[str, float]
     s["B5"].value = round(sum(seed_f.values()), 2)
 
     header_row = start - 1
-    for i, h in enumerate(["Code", "Name", "Region", "Status", "Recommended Planned Sales",
+    for i, h in enumerate(["Code", "Name", "Division", "Status", "Recommended Planned Sales",
                            "COO Adjusted Planned Sales", "Variance ($)", "Variance (%)",
                            "% of Agency", "Multiplier", "Store Growth %"]):
         _hdr(s.cell(header_row, i + 1)).value = h
@@ -978,7 +978,7 @@ def _plan_inputs(wb: Workbook, stores: list[dict], recommended: dict[str, float]
     )
     s.cell(header_row, 5).comment = Comment(
         "This store's model forecast (new stores inherit the average of up to three "
-        "same-region comparables; closed stores start at $0) grown by the all-stores rate "
+        "same-division comparables; closed stores start at $0) grown by the all-stores rate "
         "in B9 and by its own rate in column K. A formula, not a typed number: change either "
         "rate and the row moves. Left unchanged so the variance stays meaningful.",
         "workbook.py",
@@ -1391,7 +1391,7 @@ def _exec_calendar_inputs(wb: Workbook, s, session_name: str, stores: list[dict]
 
 
 def _all_stores_summary(wb: Workbook, s, stores: list[dict]) -> None:
-    headers = ["Store Code", "Store Name", "Region", "Status", "Recommended ($)",
+    headers = ["Store Code", "Store Name", "Division", "Status", "Recommended ($)",
                "COO Adjusted ($)", "Variance ($)", "Variance (%)"]
     for i, h in enumerate(headers):
         _hdr(s.cell(1, i + 1)).value = h

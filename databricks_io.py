@@ -446,6 +446,140 @@ def _sql_literal(value: str) -> str:
     return "'" + str(value).replace("'", "''") + "'"
 
 
+OVERRIDES_TABLE = f"{SCHEMA}.sales_forecast_overrides"
+_OVERRIDE_COLUMNS = (
+    "unique_id", "date", "store_name", "division", "original_forecast", "adjusted_forecast",
+    "adjustment_reason", "adjusted_by", "store_code", "region", "location_type", "status",
+    "growth_pct", "recommended", "variance",
+)
+
+
+def build_override_rows(year: int, stores: list[dict], outlet_codes, forecasted: dict,
+                        store_rate, recommended: dict, overrides: dict,
+                        reason: str = "") -> list[dict]:
+    """One row per store for the plan year, shaped like sales_forecast_overrides.
+
+    `date` is the first day of the plan year: the Stores table is an annual figure per store,
+    so it has no finer date than the period it covers. `adjusted_forecast` is the COO Adjusted
+    value and is NULL for a store nobody overrode (the number it carries is `recommended`).
+    `growth_pct` is the percent as the Stores table shows it (1.0 means 1%).
+    """
+    rows = []
+    for s in stores:
+        code = s["code"]
+        rec = round(recommended.get(code, 0.0), 2)
+        adj = round(float(overrides[code]), 2) if code in overrides else None
+        rows.append({
+            "unique_id": code,
+            "date": dt.date(int(year), 1, 1),
+            "store_name": s["name"],
+            "division": s["region"],   # East / West; `region` carries the same value
+            "original_forecast": round(forecasted.get(code, 0.0), 2),
+            "adjusted_forecast": adj,
+            "adjustment_reason": (reason.strip() or None) if adj is not None else None,
+            "store_code": code,
+            "region": s["region"],
+            "location_type": "Outlet" if code in outlet_codes else "Store",
+            "status": s["status"],
+            "growth_pct": round(store_rate(code) * 100, 4),
+            "recommended": rec,
+            "variance": round((adj if adj is not None else rec) - rec, 2),
+        })
+    return rows
+
+
+def _lit(value) -> str:
+    if value is None:
+        return "NULL"
+    if isinstance(value, dt.date):
+        return f"DATE'{value.isoformat()}'"
+    if isinstance(value, (int, float)):
+        return repr(float(value))
+    return _sql_literal(value)
+
+
+def build_overrides_merge(rows: list[dict], adjusted_by: str) -> str:
+    """MERGE keyed on (unique_id, date): saving again replaces that year's rows, never doubles."""
+    if not rows:
+        raise ValueError("Nothing to save.")
+    by = _sql_literal(adjusted_by)
+    values = ",\n".join(
+        "(" + ", ".join(_lit(r[c]) if c != "adjusted_by" else by for c in _OVERRIDE_COLUMNS) + ")"
+        for r in rows
+    )
+    return (
+        f"MERGE INTO {OVERRIDES_TABLE} AS t USING (\n"
+        "SELECT CAST(unique_id AS STRING) AS unique_id, CAST(date AS DATE) AS date,\n"
+        "  CAST(store_name AS STRING) AS store_name, CAST(division AS STRING) AS division,\n"
+        "  CAST(original_forecast AS DOUBLE) AS original_forecast,\n"
+        "  CAST(adjusted_forecast AS DOUBLE) AS adjusted_forecast,\n"
+        "  CAST(adjustment_reason AS STRING) AS adjustment_reason,\n"
+        "  CAST(adjusted_by AS STRING) AS adjusted_by, current_timestamp() AS adjusted_at,\n"
+        "  CAST(store_code AS STRING) AS store_code, CAST(region AS STRING) AS region,\n"
+        "  CAST(location_type AS STRING) AS location_type, CAST(status AS STRING) AS status,\n"
+        "  CAST(growth_pct AS DOUBLE) AS growth_pct, CAST(recommended AS DOUBLE) AS recommended,\n"
+        "  CAST(variance AS DOUBLE) AS variance\n"
+        f"FROM VALUES\n{values}\n"
+        f"AS v({', '.join(_OVERRIDE_COLUMNS)})\n"
+        ") AS s ON t.unique_id = s.unique_id AND t.date = s.date\n"
+        "WHEN MATCHED THEN UPDATE SET *\n"
+        "WHEN NOT MATCHED THEN INSERT *"
+    )
+
+
+def save_overrides(rows: list[dict], adjusted_by: str) -> dict:
+    if not is_configured():
+        return {"status": "skipped", "reason": "Databricks credentials not configured."}
+    execute(build_overrides_merge(rows, adjusted_by))
+    return {"status": "saved", "rows": len(rows)}
+
+
+_SAVED_QUERY = """
+SELECT store_code, original_forecast, adjusted_forecast, adjustment_reason, growth_pct,
+       recommended, adjusted_by, adjusted_at
+FROM {table}
+WHERE YEAR(date) = {year}
+"""
+
+
+def fetch_saved_overrides(plan_year: int) -> dict:
+    return execute(_SAVED_QUERY.format(table=OVERRIDES_TABLE, year=int(plan_year)))
+
+
+def parse_saved_overrides(rows: list[dict], default_store_growth: float) -> dict:
+    """Turn saved rows back into the app's state: overrides, per-store growth, network rate.
+
+    The table has no column for the all-stores rate (Plan_Inputs B9), but every row carries
+    `recommended` = original x (1 + store rate) x (1 + network rate), so the network rate is
+    recoverable from any store nobody overrode. The median across stores ignores a row that
+    was edited by hand. Returns {} when there is nothing saved.
+    """
+    if not rows:
+        return {}
+    overrides, store_growth, implied = {}, {}, []
+    for r in rows:
+        code = r.get("store_code")
+        if not code:
+            continue
+        if r.get("adjusted_forecast") is not None:
+            overrides[code] = float(r["adjusted_forecast"])
+        rate = (float(r["growth_pct"]) / 100.0) if r.get("growth_pct") is not None \
+            else default_store_growth
+        if abs(rate - default_store_growth) > 1e-9:
+            store_growth[code] = rate
+        orig, rec = r.get("original_forecast"), r.get("recommended")
+        if orig and rec is not None and float(orig) > 0:
+            implied.append(float(rec) / (float(orig) * (1 + rate)) - 1)
+    implied.sort()
+    n = len(implied)
+    network = (implied[n // 2] if n % 2 else (implied[n // 2 - 1] + implied[n // 2]) / 2) if n else 0.0
+    stamp = max((r["adjusted_at"] for r in rows if r.get("adjusted_at")), default=None)
+    who = next((r.get("adjusted_by") for r in rows if r.get("adjusted_at") == stamp), None)
+    return {"overrides": overrides, "store_growth": store_growth,
+            "growth_rate": round(network, 6), "adjusted_at": stamp, "adjusted_by": who,
+            "stores": len(rows)}
+
+
 def publish_scenario(scenario: dict) -> dict:
     scenario_id = scenario.get("id", "")
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", str(scenario_id)):

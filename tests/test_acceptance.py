@@ -466,7 +466,7 @@ def test_plan_inputs_carries_both_tracks_and_an_editable_total():
     start, end = 14, 14 + 3 - 1
 
     assert [s.cell(13, c).value for c in range(1, 12)] == [
-        "Code", "Name", "Region", "Status", "Recommended Planned Sales",
+        "Code", "Name", "Division", "Status", "Recommended Planned Sales",
         "COO Adjusted Planned Sales", "Variance ($)", "Variance (%)",
         "% of Agency", "Multiplier", "Store Growth %"]
 
@@ -1278,7 +1278,7 @@ import contextlib
 
 
 @contextlib.contextmanager
-def _warehouse(configured=True, rows=None, raises=False):
+def _warehouse(configured=True, rows=None, raises=False, saved_rows=None):
     """Stand in for the warehouse and nothing else.
 
     Only databricks_io.execute is replaced, so fetch_store_forecasts, parse_store_forecasts,
@@ -1295,6 +1295,8 @@ def _warehouse(configured=True, rows=None, raises=False):
         calls.append(statement)
         if raises:
             raise RuntimeError("warehouse unavailable")
+        if "sales_forecast_overrides" in statement:     # the save table, not the forecast
+            return {"columns": [], "rows": saved_rows or [], "source": "live", "run_timestamp": "t"}
         return {"columns": ["store_code", "forecast_total", "first_date", "last_date", "n_days"],
                 "rows": rows or [], "source": "live", "run_timestamp": "t"}
 
@@ -1307,6 +1309,11 @@ def _warehouse(configured=True, rows=None, raises=False):
     finally:
         for k, v in saved.items():
             setattr(dbx, k, v)
+
+
+def _fq(calls):
+    """Forecast queries only; the save-table read is counted on its own."""
+    return [c for c in calls if "sales_forecast_overrides" not in c]
 
 
 def _open_app():
@@ -1331,7 +1338,7 @@ def test_the_forecast_is_the_default_when_the_app_opens():
         level, msg = ss["run_status"]
         assert level == "success" and "automatically" in msg, ss["run_status"]
         assert f"Matched {len(STORES)} of {len(STORES)}" in msg
-        assert len(calls) == 1, f"expected one query on open, got {len(calls)}"
+        assert len(_fq(calls)) == 1, f"expected one forecast query on open, got {len(_fq(calls))}"
 
         # ...and it is what the page shows: the plan starts from the forecast, not $150M
         assert any("$" in m.value and "150,000,000" not in m.value for m in at.success)
@@ -1343,12 +1350,12 @@ def test_the_forecast_loads_once_not_on_every_interaction():
     rows = _full_year_rows([st["code"] for st in STORES], value=1_000_000.0)
     with _warehouse(configured=True, rows=rows) as calls:
         at = _open_app()
-        assert len(calls) == 1
+        assert len(_fq(calls)) == 1
         at.session_state["growth_rate"] = 0.02
         at.session_state["store_growth"] = {STORES[0]["code"]: 0.07}
         at.run()
         assert not at.exception, at.exception
-        assert len(calls) == 1, f"a widget touch re-queried the warehouse ({len(calls)} queries)"
+        assert len(_fq(calls)) == 1, f"a widget touch re-queried the warehouse ({len(_fq(calls))} queries)"
         assert at.session_state["growth_rate"] == 0.02, "the COO's edit was overwritten"
         assert at.session_state["store_growth"] == {STORES[0]["code"]: 0.07}
         assert len(at.session_state["db_forecasts"]) == len(STORES)
@@ -1512,7 +1519,7 @@ def test_all_stores_summary_shows_variance_per_store():
     wb = _wb(stores)
     s = wb["All_Stores_Summary"]
     assert [s.cell(1, c).value for c in range(1, 9)] == [
-        "Store Code", "Store Name", "Region", "Status", "Recommended ($)",
+        "Store Code", "Store Name", "Division", "Status", "Recommended ($)",
         "COO Adjusted ($)", "Variance ($)", "Variance (%)"]
     first = tab_name(stores[0])
     assert s["E2"].value == f"='{first}'!$Q$2"
@@ -1914,6 +1921,120 @@ def test_oauth_u2m_is_opt_in_not_a_silent_fallback():
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
+
+
+# --- save to / read from sales_forecast_overrides ---------------------------------------------
+def _save_rows(overrides=None, rates=None, network=0.0, reason="r"):
+    import datetime as dt
+    import databricks_io as dbx
+
+    forecasted = {s["code"]: 1_000_000.0 + 1234.567 * i for i, s in enumerate(STORES)}
+    rates = rates or {}
+    rate = lambda c: rates.get(c, 0.01)
+    rec = {c: round(f * (1 + rate(c)) * (1 + network), 2) for c, f in forecasted.items()}
+    rows = dbx.build_override_rows(2027, STORES, {"BANS", "BROS", "OUTS"}, forecasted, rate,
+                                   rec, overrides or {}, reason)
+    return rows, forecasted
+
+
+def test_available_years_adds_the_next_year_on_december_first():
+    import datetime as dt
+    from forecast_engine import available_years
+
+    assert available_years(dt.date(2026, 10, 13)) == [2027]       # never below FY2027
+    assert available_years(dt.date(2026, 12, 1)) == [2027]
+    assert available_years(dt.date(2027, 11, 30)) == [2027]       # one day short
+    assert available_years(dt.date(2027, 12, 1)) == [2027, 2028]
+    assert available_years(dt.date(2028, 6, 1)) == [2027, 2028]
+    assert available_years(dt.date(2028, 12, 1)) == [2027, 2028, 2029]
+
+
+def test_save_rows_match_the_table_shape():
+    import databricks_io as dbx
+
+    code = STORES[0]["code"]
+    rows, forecasted = _save_rows({code: 5_000_000.0}, {STORES[1]["code"]: 0.05})
+    assert len(rows) == len(STORES)
+    r = rows[0]
+    assert set(r) == set(dbx._OVERRIDE_COLUMNS) - {"adjusted_by"}
+    assert r["unique_id"] == r["store_code"] == code
+    assert r["division"] == r["region"] == STORES[0]["region"] and r["division"] in ("East", "West")
+    assert r["adjusted_forecast"] == 5_000_000.0 and r["adjustment_reason"] == "r"
+    assert r["variance"] == round(5_000_000.0 - r["recommended"], 2)
+    other = rows[2]                                   # not overridden: NULL, zero variance
+    assert other["adjusted_forecast"] is None and other["adjustment_reason"] is None
+    assert other["variance"] == 0.0
+    assert rows[1]["growth_pct"] == 5.0 and other["growth_pct"] == 1.0
+    assert all(str(x["date"]) == "2027-01-01" for x in rows)
+
+
+def test_merge_statement_is_keyed_and_escapes():
+    import databricks_io as dbx
+
+    rows, _ = _save_rows({STORES[0]["code"]: 1.0}, reason="it's \"fine\"")
+    sql = dbx.build_overrides_merge(rows, "o'brien@x.org")
+    assert sql.startswith(f"MERGE INTO {dbx.OVERRIDES_TABLE} AS t")
+    assert "ON t.unique_id = s.unique_id AND t.date = s.date" in sql
+    assert "'it''s" in sql and "'o''brien@x.org'" in sql
+    assert sql.count("DATE'2027-01-01'") == len(STORES)
+    assert "NULL" in sql and "current_timestamp()" in sql
+    assert sql.count("(") == sql.count(")")
+
+
+def test_saved_plan_reads_back_what_was_saved():
+    import databricks_io as dbx
+
+    a, b = STORES[0]["code"], STORES[1]["code"]
+    rows, _ = _save_rows({a: 5_000_000.0}, {b: 0.05}, network=0.02)
+    out = dbx.parse_saved_overrides(rows, 0.01)
+    assert out["overrides"] == {a: 5_000_000.0}
+    assert out["store_growth"] == {b: 0.05}
+    assert abs(out["growth_rate"] - 0.02) < 1e-5, out["growth_rate"]
+    assert dbx.parse_saved_overrides([], 0.01) == {}
+
+
+def test_app_save_button_writes_one_merge_and_open_reads_the_table():
+    rows = _full_year_rows([st["code"] for st in STORES], value=2_000_000.0)
+    with _warehouse(configured=True, rows=rows) as calls:
+        at = _open_app()
+        assert not at.exception, at.exception
+        assert any("sales_forecast_overrides" in c and "SELECT" in c for c in calls),             "opening a plan year must read the save table"
+        n = len(calls)
+        btn = [b for b in at.button if "Save to Databricks" in b.label][0]
+        assert not btn.disabled
+        btn.click().run()
+        assert not at.exception, at.exception
+        merges = [c for c in calls[n:] if c.lstrip().startswith("MERGE INTO")]
+        assert len(merges) == 1 and merges[0].count("DATE'2027-01-01'") == len(STORES)
+        assert any("Saved" in x.value for x in at.success)
+
+
+def test_app_restores_a_saved_plan_on_open():
+    a = STORES[0]["code"]
+    fc = _full_year_rows([st["code"] for st in STORES], value=2_000_000.0)
+    saved = [{"store_code": a, "original_forecast": 2_000_000.0, "adjusted_forecast": 3_000_000.0,
+              "adjustment_reason": "x", "growth_pct": 1.0, "recommended": 2_020_000.0,
+              "adjusted_by": "mark@x.org", "adjusted_at": "2026-12-02 10:00:00"}]
+    with _warehouse(configured=True, rows=fc, saved_rows=saved):
+        at = _open_app()
+        assert not at.exception, at.exception
+        assert at.session_state["overrides"] == {a: 3_000_000.0}
+        assert any("mark@x.org" in x.value for x in at.info)
+
+
+def test_save_is_disabled_without_a_warehouse():
+    with _warehouse(configured=False):
+        at = _open_app()
+        assert not at.exception, at.exception
+        assert [b for b in at.button if "Save to Databricks" in b.label][0].disabled
+
+
+def test_division_replaces_region_on_screen_and_in_the_workbook():
+    src = (ROOT / "app.py").read_text(encoding="utf-8")
+    assert '"Division": s["region"]' in src and '"Region"' not in src
+    wb = _wb()
+    hdr = [c.value for c in wb["Plan_Inputs"][13]]
+    assert "Division" in hdr and "Region" not in hdr
 
 
 if __name__ == "__main__":

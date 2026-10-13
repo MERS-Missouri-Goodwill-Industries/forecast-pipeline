@@ -14,7 +14,7 @@ import streamlit as st
 
 import databricks_io as dbx
 from forecast_engine import (
-    WEEKDAYS, build_day_factors, build_store_plan, compute_forecasted_bases,
+    WEEKDAYS, available_years, build_day_factors, build_store_plan, compute_forecasted_bases,
     default_holidays, load_seed, normalize_weights, rounded_weights, weekday_counts,
     weekday_mix,
 )
@@ -25,9 +25,9 @@ from workbook import (
 MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
               "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 
-# Planning starts at FY2027. One more year unlocks every January 1st.
+# Planning starts at FY2027. One more year is added to the dropdown every December 1st.
 FIRST_YEAR = 2027
-AVAILABLE_YEARS = list(range(FIRST_YEAR, max(FIRST_YEAR, dt.date.today().year) + 1))
+AVAILABLE_YEARS = available_years(dt.date.today(), FIRST_YEAR)
 
 OUTLET_CODES = {"BANS", "BROS", "OUTS"}
 
@@ -147,6 +147,30 @@ def load_forecast(year: int, *, automatic: bool = False) -> None:
         ss.run_status = ("error", f"Forecast run failed: {exc}")
 
 
+def load_saved_plan(year: int) -> None:
+    """Restore what was saved for `year` in sales_forecast_overrides, if anything was.
+
+    Runs after the forecast load, so the saved COO adjustments and growth rates sit on top of
+    the model's numbers rather than being wiped by them.
+    """
+    try:
+        res = dbx.fetch_saved_overrides(plan_year=year)
+        saved = dbx.parse_saved_overrides(res.get("rows", []), DEFAULT_STORE_GROWTH)
+    except Exception as exc:  # noqa: BLE001
+        ss.saved_status = ("warning", f"Could not read the saved FY{year} plan: {exc}")
+        return
+    if not saved:
+        ss.saved_status = None
+        return
+    ss.overrides = saved["overrides"]
+    ss.store_growth = saved["store_growth"]
+    ss.growth_rate = saved["growth_rate"]
+    when = saved["adjusted_at"]
+    ss.saved_status = ("info", f"Loaded the saved FY{year} plan ({saved['stores']} stores"
+                       + (f", saved by {saved['adjusted_by']}" if saved["adjusted_by"] else "")
+                       + (f" on {str(when)[:16]}" if when else "") + ").")
+
+
 # --- header -----------------------------------------------------------------------------
 # Resolve the Planning Year selector before anything reads YEAR, so the title and every
 # downstream calculation are guaranteed to reflect the selection in this same run.
@@ -167,6 +191,7 @@ if ss.get("forecast_autoloaded_year") != YEAR:
     if dbx.is_configured():
         with st.spinner(f"Loading the FY{YEAR} forecast from Databricks…"):
             load_forecast(YEAR, automatic=True)
+            load_saved_plan(YEAR)
 with left:
     st.title(f"MERS Goodwill — FY{YEAR} Sales Planning")
     st.caption("Recommendation workbook generator. Every exported cell is a live formula.")
@@ -197,6 +222,10 @@ with right:
 
 if ss.run_status:
     level, msg = ss.run_status
+    getattr(st, level)(msg)
+
+if ss.get("saved_status"):
+    level, msg = ss.saved_status
     getattr(st, level)(msg)
 
 if ss.day_pct_status:
@@ -294,6 +323,26 @@ with st.container(key="export_build"):
             file_name=file_name,
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
+
+# --- save --------------------------------------------------------------------------------
+st.subheader("Save")
+reason = st.text_input("Reason for the adjustments (optional)", key="save_reason",
+                       help="Recorded on every store you overrode with COO Adjusted.")
+if st.button("💾  Save to Databricks", width="stretch",
+             disabled=not dbx.is_configured(),
+             help=f"Writes this plan to {dbx.OVERRIDES_TABLE}. Saving again replaces FY{YEAR}."):
+    who = (st.context.headers.get("X-Forwarded-Email")
+           or st.context.headers.get("X-Forwarded-Preferred-Username") or "unknown")
+    try:
+        out = dbx.save_overrides(
+            dbx.build_override_rows(YEAR, STORES, OUTLET_CODES, forecasted, store_rate,
+                                    recommended_of, ss.overrides, reason),
+            adjusted_by=who)
+        st.success(f"Saved {out['rows']} stores for FY{YEAR} to {dbx.OVERRIDES_TABLE}.")
+    except Exception as exc:  # noqa: BLE001
+        st.error(f"Save failed: {exc}")
+if not dbx.is_configured():
+    st.caption("Saving needs a Databricks connection (Local / Mock Data is on).")
 
 # --- controls ---------------------------------------------------------------------------
 c1, c2 = st.columns([1, 2])
@@ -550,7 +599,7 @@ st.caption("Two things you can set per store. **Growth (%)** changes that store'
 # rows reading "COO Adjusted: None" beside a non-zero variance, which is just the growth
 # rate wearing the wrong label. These three columns are Plan_Inputs E, F and G.
 edited = st.data_editor(
-    [{"Code": s["code"], "Store": s["name"], "Region": s["region"],
+    [{"Code": s["code"], "Store": s["name"], "Division": s["region"],
       "Location Type": "Outlet" if s["code"] in OUTLET_CODES else "Store",
       "Status": s["status"],
       "Forecasted": round(forecasted.get(s["code"], 0.0), 2),
@@ -560,7 +609,7 @@ edited = st.data_editor(
       "Variance": round(effective.get(s["code"], 0.0) - recommended_of.get(s["code"], 0.0), 2)}
      for s in STORES],
     hide_index=True, width="stretch", height=380,
-    disabled=["Code", "Store", "Region", "Location Type", "Status", "Forecasted",
+    disabled=["Code", "Store", "Division", "Location Type", "Status", "Forecasted",
               "Recommended", "Variance"],
     column_config={
         "Forecasted": st.column_config.NumberColumn(
